@@ -87,7 +87,7 @@ export function triggerVerifiedZipDownload(
     ZIP_DOWNLOAD_ENDPOINT,
     ZIP_FILE_NAME,
     'application/zip',
-    1725992,
+    5206030,
     onProgress
   );
 }
@@ -99,7 +99,7 @@ export function triggerVerifiedApkDownload(
     APK_DOWNLOAD_ENDPOINT,
     APK_FILE_NAME,
     'application/vnd.android.package-archive',
-    1746544,
+    5252881,
     onProgress
   );
 }

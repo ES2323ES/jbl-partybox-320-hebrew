@@ -1,0 +1,70 @@
+name: Auto Sequential Release (v2, v3, v4...)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with full tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if HEAD already has a release tag and compute next vN
+        id: calc_version
+        run: |
+          git fetch --tags --force
+          EXISTING_ON_HEAD=$(git tag --points-at HEAD | grep -E '^v[0-9]+' || true)
+          if [ -n "$EXISTING_ON_HEAD" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD already tagged with $EXISTING_ON_HEAD — skipping duplicate release."
+            exit 0
+          fi
+
+          MAX_NUM=1
+          for t in $(git tag -l 'v*'); do
+            NUM=$(echo "$t" | sed -E 's/^v([0-9]+).*/\1/')
+            if [[ "$NUM" =~ ^[0-9]+$ ]] && [ "$NUM" -gt "$MAX_NUM" ]; then
+              MAX_NUM="$NUM"
+            fi
+          done
+
+          NEXT_NUM=$((MAX_NUM + 1))
+          NEXT_TAG="v${NEXT_NUM}"
+          APP_VER=$(node -p "require('./package.json').version || '0.2.2'")
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "next_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "app_ver=${APP_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release (${{ steps.calc_version.outputs.next_tag }}) with APK & ZIP
+        if: steps.calc_version.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_TAG: ${{ steps.calc_version.outputs.next_tag }}
+          APP_VER: ${{ steps.calc_version.outputs.app_ver }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG (App version $APP_VER)"
+          git push origin "$NEXT_TAG"
+
+          ASSETS=()
+          if [ -f "public/JBL-PartyBox-320-HE-APK.zip" ]; then
+            ASSETS+=("public/JBL-PartyBox-320-HE-APK.zip")
+          fi
+          if [ -f "public/JBL-PartyBox-320-HE.apk" ]; then
+            ASSETS+=("public/JBL-PartyBox-320-HE.apk")
+          fi
+
+          gh release create "$NEXT_TAG" "${ASSETS[@]}" \
+            --title "JBL PartyBox 320 Hebrew ${NEXT_TAG} (גרסה ${APP_VER})" \
+            --notes "עדכון אוטומטי ${NEXT_TAG} של אפליקציית השליטה בעברית לרמקול **JBL PartyBox Stage 320** (גרסת אפליקציה \`${APP_VER}\`)."

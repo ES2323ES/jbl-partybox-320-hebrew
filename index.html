@@ -1,24 +1,24 @@
 <!doctype html>
-<html lang="he" dir="rtl" class="dark">
+<html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0B0D11" />
+    <meta name="theme-color" content="#F4F6FA" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="PartyBox 320" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>JBL PartyBox 320 — מרכז שליטה</title>
     <meta
       name="description"
-      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, הדגשת בס ואפקטי מסיבה."
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, חיבור Bluetooth ואפקטי מסיבה."
     />
     <meta property="og:title" content="JBL PartyBox 320 — מרכז שליטה" />
     <meta
       property="og:description"
-      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, הדגשת בס ואפקטי מסיבה."
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, חיבור Bluetooth ואפקטי מסיבה."
     />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -28,8 +28,18 @@
       href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Rubik:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
+    <script>
+      try {
+        var savedTheme = localStorage.getItem('jbl_pb320_theme_v2');
+        if (savedTheme === 'dark') {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+      } catch (e) {}
+    </script>
   </head>
-  <body class="bg-[#0B0D11] text-[#F3F5F8] antialiased selection:bg-[#FF5500]/30 selection:text-white">
+  <body class="bg-[#F4F6FA] text-slate-800 dark:bg-[#161D2B] dark:text-slate-100 antialiased selection:bg-[#D95B2B]/20 selection:text-[#D95B2B] transition-colors duration-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

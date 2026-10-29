@@ -104,9 +104,11 @@ export interface MicGuitarState {
   vocalDucking: boolean;
 }
 
+export const APP_VERSION = '0.2.2';
+
 export interface SpeakerSystemState {
   deviceName: string;
-  connectionType: 'demo' | 'ble';
+  connectionType: 'demo' | 'ble' | 'android_bt';
   bleDeviceTitle: string | null;
   volume: number; // 0 - 100
   muted: boolean;

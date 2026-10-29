@@ -31,6 +31,8 @@ interface PersistedDeviceSession {
   username: string | null;
   repoUrl: string | null;
   releaseUrl: string | null;
+  latestReleaseTag: string | null;
+  deployKeyInstalled: boolean;
   error: string | null;
 }
 
@@ -44,9 +46,11 @@ const DEFAULT_SESSION: PersistedDeviceSession = {
   intervalSec: 5,
   expiresAt: null,
   accessToken: null,
-  username: null,
-  repoUrl: null,
+  username: 'ES2323ES',
+  repoUrl: 'https://github.com/ES2323ES/jbl-partybox-320-hebrew',
   releaseUrl: null,
+  latestReleaseTag: null,
+  deployKeyInstalled: false,
   error: null,
 };
 
@@ -74,7 +78,10 @@ function loadSession(rootDir: string): PersistedDeviceSession {
 function saveSession(rootDir: string, session: PersistedDeviceSession): void {
   const file = getSessionFilePath(rootDir);
   try {
-    fs.writeFileSync(file, JSON.stringify(session, null, 2), 'utf-8');
+    fs.writeFileSync(file, JSON.stringify(session, null, 2), {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
   } catch {
     // ignore
   }
@@ -91,8 +98,55 @@ function publicSessionView(s: PersistedDeviceSession) {
     username: s.username,
     repoUrl: s.repoUrl,
     releaseUrl: s.releaseUrl,
+    latestReleaseTag: s.latestReleaseTag,
+    hasPermanentKey: Boolean(s.accessToken || process.env.GITHUB_TOKEN?.trim()),
+    deployKeyInstalled: Boolean(s.deployKeyInstalled),
     error: s.error,
   };
+}
+
+function getAppVersion(rootDir: string): string {
+  try {
+    const pkgPath = path.resolve(rootDir, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as {
+      version?: string;
+    };
+    return pkg.version || '0.2.2';
+  } catch {
+    return '0.2.2';
+  }
+}
+
+function ensureLocalSshDeployKey(rootDir: string): {
+  privateKeyPath: string;
+  publicKey: string | null;
+} {
+  const gitDir = path.resolve(rootDir, '.git');
+  const keyPath = path.join(gitDir, 'jbl_deploy_ed25519');
+  const pubPath = `${keyPath}.pub`;
+  try {
+    if (!fs.existsSync(pubPath)) {
+      execFileSync(
+        'ssh-keygen',
+        [
+          '-t',
+          'ed25519',
+          '-C',
+          'jbl-partybox-320-permanent-key',
+          '-f',
+          keyPath,
+          '-N',
+          '',
+        ],
+        { stdio: 'ignore' }
+      );
+      fs.chmodSync(keyPath, 0o600);
+    }
+    const pub = fs.readFileSync(pubPath, 'utf-8').trim();
+    return { privateKeyPath: keyPath, publicKey: pub };
+  } catch {
+    return { privateKeyPath: keyPath, publicKey: null };
+  }
 }
 
 async function ghFetch(
@@ -108,13 +162,145 @@ async function ghFetch(
   return fetch(url, { ...init, headers });
 }
 
-async function createAndPushGithubRepo(
+async function computeNextSequentialReleaseTag(
+  fullName: string,
+  token: string
+): Promise<string> {
+  let maxNum = 0;
+
+  try {
+    const relRes = await ghFetch(
+      `https://api.github.com/repos/${fullName}/releases?per_page=100`,
+      token
+    );
+    if (relRes.ok) {
+      const releases = (await relRes.json()) as Array<{ tag_name?: string }>;
+      for (const r of releases) {
+        const m = /^v(\d+)/i.exec(r.tag_name || '');
+        if (m) {
+          const n = Number(m[1]);
+          if (n > maxNum) maxNum = n;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const tagRes = await ghFetch(
+      `https://api.github.com/repos/${fullName}/tags?per_page=100`,
+      token
+    );
+    if (tagRes.ok) {
+      const tags = (await tagRes.json()) as Array<{ name?: string }>;
+      for (const t of tags) {
+        const m = /^v(\d+)/i.exec(t.name || '');
+        if (m) {
+          const n = Number(m[1]);
+          if (n > maxNum) maxNum = n;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (maxNum === 0) {
+    return 'v1';
+  }
+  return `v${maxNum + 1}`;
+}
+
+async function registerPermanentDeployKey(
+  rootDir: string,
+  fullName: string,
+  token: string
+): Promise<boolean> {
+  const { privateKeyPath, publicKey } = ensureLocalSshDeployKey(rootDir);
+  if (!publicKey) return false;
+
+  let installed = false;
+  try {
+    const existingKeysRes = await ghFetch(
+      `https://api.github.com/repos/${fullName}/keys?per_page=100`,
+      token
+    );
+    if (existingKeysRes.ok) {
+      const keys = (await existingKeysRes.json()) as Array<{ key?: string }>;
+      const rawKeyPart = publicKey.split(' ').slice(0, 2).join(' ');
+      if (keys.some((k) => (k.key || '').startsWith(rawKeyPart))) {
+        installed = true;
+      }
+    }
+
+    if (!installed) {
+      const addRes = await ghFetch(
+        `https://api.github.com/repos/${fullName}/keys`,
+        token,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: 'JBL PartyBox 320 App — Permanent Deploy Key',
+            key: publicKey,
+            read_only: false,
+          }),
+        }
+      );
+      if (addRes.ok || addRes.status === 422) {
+        installed = true;
+      }
+    }
+
+    if (installed) {
+      try {
+        execFileSync(
+          'git',
+          [
+            'config',
+            'core.sshCommand',
+            `ssh -i ${privateKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+          ],
+          { cwd: rootDir, stdio: 'ignore' }
+        );
+        try {
+          execFileSync(
+            'git',
+            ['remote', 'set-url', 'origin', `git@github.com:${fullName}.git`],
+            { cwd: rootDir, stdio: 'ignore' }
+          );
+        } catch {
+          execFileSync(
+            'git',
+            ['remote', 'add', 'origin', `git@github.com:${fullName}.git`],
+            { cwd: rootDir, stdio: 'ignore' }
+          );
+        }
+      } catch {
+        // ignore git config warning
+      }
+    }
+  } catch {
+    // ignore deploy key registration errors
+  }
+
+  return installed;
+}
+
+async function syncRepoAndPublishNextRelease(
   rootDir: string,
   token: string,
   requestedName: string,
   isPrivate: boolean,
   resolveStaticBinary: (name: string) => string | null
-): Promise<{ username: string; repoUrl: string; releaseUrl: string | null }> {
+): Promise<{
+  username: string;
+  repoUrl: string;
+  releaseUrl: string | null;
+  latestReleaseTag: string;
+  deployKeyInstalled: boolean;
+}> {
   const userRes = await ghFetch('https://api.github.com/user', token);
   if (!userRes.ok) {
     throw new Error(`אימות משתמש ב-GitHub נכשל (HTTP ${userRes.status})`);
@@ -125,74 +311,102 @@ async function createAndPushGithubRepo(
   const cleanBaseName =
     requestedName.trim().replace(/[^a-zA-Z0-9._-]/g, '-') ||
     'jbl-partybox-320-hebrew';
-  const description =
-    'אפליקציית שליטה ייעודית בעברית לרמקול JBL PartyBox Stage 320 כולל תאורת מופע, איקוולייזר 7 ערוצים וקובץ APK לאנדרואיד';
+  const appVersion = getAppVersion(rootDir);
+  const description = `אפליקציית שליטה ייעודית בעברית לרמקול JBL PartyBox Stage 320 (גרסה ${appVersion}) — תאורת מופע, איקוולייזר 7 ערוצים, חיבור Bluetooth וקובץ APK`;
 
   let repoInfo: { full_name: string; html_url: string } | null = null;
-  const candidateNames = [
-    cleanBaseName,
-    `${cleanBaseName}-app`,
-    `${cleanBaseName}-${Math.floor(100 + Math.random() * 900)}`,
-  ];
 
-  let lastErr = '';
-  for (const candidate of candidateNames) {
+  // 1. Check if the target repository already exists so we update it in place!
+  const existingRepoRes = await ghFetch(
+    `https://api.github.com/repos/${username}/${cleanBaseName}`,
+    token
+  );
+  if (existingRepoRes.ok) {
+    repoInfo = (await existingRepoRes.json()) as {
+      full_name: string;
+      html_url: string;
+    };
+    // Update repo description to reflect current version
+    await ghFetch(`https://api.github.com/repos/${repoInfo.full_name}`, token, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description }),
+    }).catch(() => {});
+  } else {
+    // Create the repository if it does not exist yet
     const createRes = await ghFetch('https://api.github.com/user/repos', token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: candidate,
+        name: cleanBaseName,
         description,
         private: isPrivate,
         auto_init: false,
       }),
     });
-
-    if (createRes.ok) {
-      repoInfo = (await createRes.json()) as {
-        full_name: string;
-        html_url: string;
-      };
-      break;
-    } else {
+    if (!createRes.ok) {
       const errJson = (await createRes.json().catch(() => ({}))) as {
         message?: string;
-        errors?: Array<{ message?: string }>;
       };
-      lastErr =
-        errJson.errors?.[0]?.message ||
-        errJson.message ||
-        `HTTP ${createRes.status}`;
-      if (createRes.status !== 422) {
-        break;
-      }
+      throw new Error(
+        `יצירת או פתיחת המאגר נכשלה: ${errJson.message || createRes.status}`
+      );
     }
-  }
-
-  if (!repoInfo) {
-    throw new Error(`יצירת המאגר נכשלה: ${lastErr}`);
+    repoInfo = (await createRes.json()) as {
+      full_name: string;
+      html_url: string;
+    };
   }
 
   const fullName = repoInfo.full_name;
 
+  // 2. Register permanent Ed25519 SSH Deploy Key on the repository
+  const deployKeyInstalled = await registerPermanentDeployKey(
+    rootDir,
+    fullName,
+    token
+  );
+
+  // 3. Determine next sequential release tag (v2, v3, v4...) BEFORE pushing so we can tag HEAD cleanly!
+  const nextTag = await computeNextSequentialReleaseTag(fullName, token);
+
+  // 4. Commit any pending changes and tag HEAD with nextTag (so GitHub Actions sees HEAD is already tagged and won't double-release)
   try {
     execFileSync('git', ['add', '-A'], { cwd: rootDir, stdio: 'ignore' });
     execFileSync(
       'git',
-      ['commit', '-m', 'chore: sync latest JBL PartyBox 320 build'],
+      [
+        'commit',
+        '-m',
+        `release(${nextTag}): JBL PartyBox 320 Hebrew v${appVersion} — soothing UI, Bluetooth permissions & permanent key`,
+      ],
       { cwd: rootDir, stdio: 'ignore' }
     );
   } catch {
     // Working tree already clean
   }
 
-  const pushUrl = `https://x-access-token:${encodeURIComponent(token)}@github.com/${fullName}.git`;
-  execFileSync('git', ['push', '--force', pushUrl, 'HEAD:refs/heads/main'], {
-    cwd: rootDir,
-    stdio: 'pipe',
-  });
+  try {
+    execFileSync('git', ['tag', '-f', nextTag, 'HEAD'], {
+      cwd: rootDir,
+      stdio: 'ignore',
+    });
+  } catch {
+    // ignore tag warning
+  }
 
-  // Create GitHub Release v1.0.0 with signed APK & ZIP assets
+  // 5. Push main branch + new sequential tag to GitHub
+  const pushUrl = `https://x-access-token:${encodeURIComponent(token)}@github.com/${fullName}.git`;
+  execFileSync(
+    'git',
+    ['push', '--force', pushUrl, 'HEAD:refs/heads/main', `refs/tags/${nextTag}`],
+    {
+      cwd: rootDir,
+      stdio: 'pipe',
+    }
+  );
+
+  // 6. Create GitHub Release (v2, v3, v4...) and attach compiled APK + ZIP
   let releaseUrl: string | null = null;
   const releaseRes = await ghFetch(
     `https://api.github.com/repos/${fullName}/releases`,
@@ -201,10 +415,22 @@ async function createAndPushGithubRepo(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        tag_name: 'v1.0.0',
+        tag_name: nextTag,
         target_commitish: 'main',
-        name: 'JBL PartyBox 320 Hebrew Control v1.0.0 (Android APK + ZIP)',
-        body: 'גרסה ראשונה ומוכנה להתקנה של אפליקציית השליטה בעברית לרמקול **JBL PartyBox Stage 320**.\n\n### קבצים מצורפים להורדה:\n- `JBL-PartyBox-320-HE-APK.zip` — ארכיון ZIP הכולל את ה-APK והוראות התקנה\n- `JBL-PartyBox-320-HE.apk` — קובץ התקנה ישיר וחתום לאנדרואיד',
+        name: `JBL PartyBox 320 Hebrew ${nextTag} — גרסה ${appVersion}`,
+        body: [
+          `שחרור אוטומטי **${nextTag}** (גרסת אפליקציה \`${appVersion}\`) עבור הרמקול **JBL PartyBox Stage 320**.`,
+          '',
+          '### מה התחדש בעדכון זה:',
+          `- **גרסת אפליקציה**: \`${appVersion}\``,
+          '- **עיצוב נעים לעין**: פלטת Soft Daylight Studio רכה ומאוזנת כברירת מחדל + מצב ערב רך (Soft Evening Slate).',
+          '- **הרשאות ואינטגרציית Bluetooth מלאה**: הרשאות סריקה וחיבור Bluetooth באנדרואיד, זיהוי רמקולי JBL מזווגים, שליטה בווליום חומרתי וסנכרון איקוולייזר.',
+          '- **מפתח GitHub קבוע וגרסאות רצות (`v2`, `v3`, `v4`...)**: כל עדכון מעלה אוטומטית גרסה ממוספרת חדשה.',
+          '',
+          '### קבצים מצורפים להורדה ישירה:',
+          '- `JBL-PartyBox-320-HE-APK.zip` — ארכיון ZIP הכולל את ה-APK המעודכן והוראות התקנה',
+          '- `JBL-PartyBox-320-HE.apk` — קובץ התקנה ישיר וחתום לאנדרואיד',
+        ].join('\n'),
         draft: false,
         prerelease: false,
       }),
@@ -258,6 +484,8 @@ async function createAndPushGithubRepo(
     username,
     repoUrl: repoInfo.html_url,
     releaseUrl,
+    latestReleaseTag: nextTag,
+    deployKeyInstalled,
   };
 }
 
@@ -317,12 +545,15 @@ async function startServer() {
       };
 
       if (tokenData.access_token) {
+        // Persist accessToken permanently in .git/gh_device_session.json (never committed to git)
         deviceSession.accessToken = tokenData.access_token;
+        deviceSession.deviceCode = null;
+        deviceSession.userCode = null;
         deviceSession.status = 'publishing';
         saveSession(rootDir, deviceSession);
 
         try {
-          const out = await createAndPushGithubRepo(
+          const out = await syncRepoAndPublishNextRelease(
             rootDir,
             tokenData.access_token,
             deviceSession.repoName,
@@ -335,6 +566,8 @@ async function startServer() {
             username: out.username,
             repoUrl: out.repoUrl,
             releaseUrl: out.releaseUrl,
+            latestReleaseTag: out.latestReleaseTag,
+            deployKeyInstalled: out.deployKeyInstalled,
             error: null,
           };
           saveSession(rootDir, deviceSession);
@@ -345,7 +578,7 @@ async function startServer() {
             error:
               pubErr instanceof Error
                 ? pubErr.message
-                : 'שגיאה ביצירת המאגר ב-GitHub',
+                : 'שגיאה בעדכון המאגר ב-GitHub',
           };
           saveSession(rootDir, deviceSession);
         }
@@ -389,7 +622,6 @@ async function startServer() {
     }
   };
 
-  // Automatically resume polling on boot if a pending device session exists on disk!
   if (deviceSession.status === 'awaiting_user' && deviceSession.deviceCode) {
     scheduleNextPoll();
   }
@@ -454,11 +686,62 @@ async function startServer() {
     res.json(publicSessionView(deviceSession));
   });
 
-  // Explicit sync endpoint (triggers immediate check + publish if user already approved)
   app.post('/api/github/device/sync', async (_req, res) => {
     await checkAndPublishOnce();
     deviceSession = loadSession(rootDir);
     res.json(publicSessionView(deviceSession));
+  });
+
+  // Push a new update & automatically create next sequential release (v2, v3, v4...) using the permanent key!
+  app.post('/api/github/push-update', async (_req, res) => {
+    deviceSession = loadSession(rootDir);
+    const savedToken =
+      deviceSession.accessToken || process.env.GITHUB_TOKEN?.trim() || null;
+
+    if (!savedToken) {
+      res.status(401).json({
+        ...publicSessionView(deviceSession),
+        error: 'טרם נשמר מפתח קבוע — בצע אישור חד-פעמי לשמירת המפתח הקבוע.',
+      });
+      return;
+    }
+
+    deviceSession = {
+      ...deviceSession,
+      status: 'publishing',
+      error: null,
+    };
+    saveSession(rootDir, deviceSession);
+
+    try {
+      const out = await syncRepoAndPublishNextRelease(
+        rootDir,
+        savedToken,
+        deviceSession.repoName || 'jbl-partybox-320-hebrew',
+        deviceSession.isPrivate,
+        resolveStaticBinary
+      );
+      deviceSession = {
+        ...deviceSession,
+        status: 'completed',
+        username: out.username,
+        repoUrl: out.repoUrl,
+        releaseUrl: out.releaseUrl,
+        latestReleaseTag: out.latestReleaseTag,
+        deployKeyInstalled: out.deployKeyInstalled,
+        error: null,
+      };
+      saveSession(rootDir, deviceSession);
+      res.json(publicSessionView(deviceSession));
+    } catch (err) {
+      deviceSession = {
+        ...deviceSession,
+        status: 'error',
+        error: err instanceof Error ? err.message : 'שגיאה בפרסום עדכון ל-GitHub',
+      };
+      saveSession(rootDir, deviceSession);
+      res.status(500).json(publicSessionView(deviceSession));
+    }
   });
 
   app.post('/api/github/device/start', async (req, res) => {
@@ -478,14 +761,12 @@ async function startServer() {
         status: 'publishing',
         repoName,
         isPrivate,
-        repoUrl: null,
-        releaseUrl: null,
         error: null,
       };
       saveSession(rootDir, deviceSession);
       res.json(publicSessionView(deviceSession));
 
-      createAndPushGithubRepo(
+      syncRepoAndPublishNextRelease(
         rootDir,
         existingToken,
         repoName,
@@ -499,6 +780,8 @@ async function startServer() {
             username: out.username,
             repoUrl: out.repoUrl,
             releaseUrl: out.releaseUrl,
+            latestReleaseTag: out.latestReleaseTag,
+            deployKeyInstalled: out.deployKeyInstalled,
             error: null,
           };
           saveSession(rootDir, deviceSession);
@@ -523,7 +806,7 @@ async function startServer() {
         },
         body: new URLSearchParams({
           client_id: GH_DEVICE_CLIENT_ID,
-          scope: 'repo workflow',
+          scope: 'repo workflow admin:public_key',
         }).toString(),
       });
 
@@ -551,9 +834,13 @@ async function startServer() {
         intervalSec: codeData.interval || 5,
         expiresAt: Date.now() + codeData.expires_in * 1000,
         accessToken: null,
-        username: null,
-        repoUrl: null,
-        releaseUrl: null,
+        username: deviceSession.username || 'ES2323ES',
+        repoUrl:
+          deviceSession.repoUrl ||
+          'https://github.com/ES2323ES/jbl-partybox-320-hebrew',
+        releaseUrl: deviceSession.releaseUrl,
+        latestReleaseTag: deviceSession.latestReleaseTag,
+        deployKeyInstalled: deviceSession.deployKeyInstalled,
         error: null,
       };
       saveSession(rootDir, deviceSession);

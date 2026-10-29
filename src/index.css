@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: 'Heebo', system-ui, -apple-system, sans-serif;
@@ -9,9 +10,14 @@
 @layer base {
   html {
     font-family: var(--font-sans);
-    background-color: #0B0D11;
-    color: #F3F5F8;
+    background-color: #F4F6FA;
+    color: #1E293B;
     scroll-behavior: smooth;
+  }
+
+  html.dark {
+    background-color: #161D2B;
+    color: #F1F5F9;
   }
 
   h1, h2, h3, .font-display {
@@ -20,7 +26,7 @@
   }
 }
 
-/* Precision Studio Hardware Range Sliders */
+/* Eye-friendly Studio Range Sliders (Light & Soft Evening Slate) */
 input[type="range"].jbl-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -31,7 +37,11 @@ input[type="range"].jbl-slider {
 input[type="range"].jbl-slider::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(100, 116, 139, 0.22);
+}
+
+html.dark input[type="range"].jbl-slider::-webkit-slider-runnable-track {
+  background: rgba(203, 213, 225, 0.16);
 }
 
 input[type="range"].jbl-slider::-webkit-slider-thumb {
@@ -40,10 +50,10 @@ input[type="range"].jbl-slider::-webkit-slider-thumb {
   width: 18px;
   height: 18px;
   border-radius: 9999px;
-  background: #FF5500;
-  border: 2px solid #FFFFFF;
+  background: #D95B2B;
+  border: 2.5px solid #FFFFFF;
   margin-top: -6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.22);
   transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -52,23 +62,27 @@ input[type="range"].jbl-slider:hover::-webkit-slider-thumb {
 }
 
 input[type="range"].jbl-slider:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid #FF5500;
+  outline: 2px solid #D95B2B;
   outline-offset: 3px;
 }
 
 input[type="range"].jbl-slider::-moz-range-track {
   height: 6px;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(100, 116, 139, 0.22);
+}
+
+html.dark input[type="range"].jbl-slider::-moz-range-track {
+  background: rgba(203, 213, 225, 0.16);
 }
 
 input[type="range"].jbl-slider::-moz-range-thumb {
   width: 18px;
   height: 18px;
   border-radius: 9999px;
-  background: #FF5500;
-  border: 2px solid #FFFFFF;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  background: #D95B2B;
+  border: 2.5px solid #FFFFFF;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.22);
   transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 

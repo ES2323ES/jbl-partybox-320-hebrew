@@ -4,8 +4,18 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Disc3, Download, LayoutGrid, Sliders, Sun, WifiOff } from 'lucide-react';
 import {
+  Bluetooth,
+  Disc3,
+  Download,
+  LayoutGrid,
+  Moon,
+  Sliders,
+  Sun,
+  WifiOff,
+} from 'lucide-react';
+import {
+  APP_VERSION,
   AcousticEnvironment,
   AuracastMode,
   BUILTIN_EQ_PRESETS,
@@ -24,6 +34,7 @@ import {
   SpeakerSystemState,
 } from './types/speaker';
 import { audioEngine } from './services/audioEngine';
+import { bluetoothBridge } from './services/bluetoothBridge';
 import { SpeakerVisualizer } from './components/SpeakerVisualizer';
 import { AudioSourceBar } from './components/AudioSourceBar';
 import { OverviewPanel } from './components/OverviewPanel';
@@ -40,15 +51,16 @@ import {
 
 const STORAGE_KEY_STATE = 'jbl_pb320_he_state_v1';
 const STORAGE_KEY_PROFILES = 'jbl_pb320_he_profiles_v1';
+const STORAGE_KEY_THEME = 'jbl_pb320_theme_v2';
 
 const DEFAULT_LIGHTSHOW: LightshowState = {
   enabled: true,
-  preset: LightshowPresetId.Rock,
-  primaryColor: '#FF5500',
-  secondaryColor: '#FFB800',
-  brightness: 85,
-  speed: 1.1,
-  strobeIntensity: 45,
+  preset: LightshowPresetId.Flow,
+  primaryColor: '#E06336',
+  secondaryColor: '#F59E0B',
+  brightness: 80,
+  speed: 1.0,
+  strobeIntensity: 35,
   beatSync: true,
   zones: {
     rings: true,
@@ -84,7 +96,7 @@ const DEFAULT_SYSTEM: SpeakerSystemState = {
   deviceName: 'JBL PartyBox Stage 320',
   connectionType: 'demo',
   bleDeviceTitle: null,
-  volume: 74,
+  volume: 72,
   muted: false,
   batteryPercent: 86,
   playtimeBoost: false,
@@ -109,17 +121,34 @@ const INITIAL_SAVED_PROFILES: SavedEqProfile[] = [
 
 export default function App() {
   const { isNativeApk, isInstalled, isInstallable, install } = usePWAInstall();
-  const [activeTab, setActiveTab] = useState<NavTab>(() =>
-    typeof window !== 'undefined' &&
-    (window.navigator.userAgent.includes('JBLPartyBox320AndroidAPK') ||
-      window.location.protocol === 'file:')
-      ? NavTab.Overview
-      : NavTab.ApkDownload
-  );
+  const [activeTab, setActiveTab] = useState<NavTab>(NavTab.Overview);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [heroDownloading, setHeroDownloading] = useState(false);
   const [heroDownloadDone, setHeroDownloadDone] = useState(false);
   const isOnline = useOnlineStatus();
+
+  // Eye-Comfort Theme (Default: Soft Daylight Studio; Optional: Soft Evening Slate)
+  const [isDarkTheme, setIsDarkTheme] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY_THEME) === 'dark';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (isDarkTheme) {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY_THEME, isDarkTheme ? 'dark' : 'light');
+    } catch {
+      // ignore
+    }
+  }, [isDarkTheme]);
 
   // Persisted Hardware States
   const [lightshow, setLightshow] = useState<LightshowState>(() => {
@@ -187,6 +216,23 @@ export default function App() {
     return INITIAL_SAVED_PROFILES;
   });
 
+  // Auto-detect paired JBL Bluetooth speaker when running inside native Android APK
+  useEffect(() => {
+    if (!bluetoothBridge.isAndroidNativeBridgeAvailable()) return;
+    const paired = bluetoothBridge.getPairedAndroidSpeakers();
+    const activeJbl =
+      paired.find((d) => d.isJbl && d.isActiveAudioRoute) ||
+      paired.find((d) => d.isJbl);
+    if (activeJbl) {
+      setSystem((prev) => ({
+        ...prev,
+        connectionType: 'android_bt',
+        bleDeviceTitle: activeJbl.name,
+        deviceName: activeJbl.name,
+      }));
+    }
+  }, []);
+
   // Live Audio Source Transport State
   const [isPlaying, setIsPlaying] = useState(false);
   const [sourceMode, setSourceMode] = useState<'groove' | 'file' | 'mic'>('groove');
@@ -214,7 +260,7 @@ export default function App() {
     }
   }, [savedProfiles]);
 
-  // Sync DSP Engine on every parameter change
+  // Sync DSP Engine + Hardware Bridge on every parameter change
   useEffect(() => {
     audioEngine.setEqGains(eq.gains);
   }, [eq.gains]);
@@ -429,14 +475,20 @@ export default function App() {
     ? baseNavItems
     : [
         ...baseNavItems,
-        { id: NavTab.ApkDownload, label: 'הורדת ZIP / APK', shortLabel: 'הורדה', icon: Download },
+        { id: NavTab.ApkDownload, label: 'הורדה ו-GitHub', shortLabel: 'הורדה', icon: Download },
       ];
 
+  const isSpeakerConnected =
+    system.connectionType === 'ble' || system.connectionType === 'android_bt';
+
   return (
-    <div className="min-h-screen bg-[#0B0D11] pb-24 text-[#F3F5F8] md:pb-12" dir="rtl">
+    <div
+      className="min-h-screen bg-[#F4F6FA] pb-24 text-slate-800 transition-colors duration-200 dark:bg-[#161D2B] dark:text-slate-100 md:pb-12"
+      dir="rtl"
+    >
       {/* Strict 3-Zone Top Bar Contract */}
-      <header className="border-b border-white/[0.08] bg-[#0B0D11]">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 py-4 sm:px-6 lg:px-8">
+      <header className="border-b border-slate-200/90 bg-white/95 backdrop-blur-md transition-colors dark:border-slate-700/70 dark:bg-[#1A2233]/95">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 py-3.5 sm:px-6 lg:px-8">
           {/* Zone 1: Single-line Brand Wordmark */}
           <a
             href="#top"
@@ -444,12 +496,12 @@ export default function App() {
               e.preventDefault();
               setActiveTab(NavTab.Overview);
             }}
-            className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+            className="font-display text-lg font-bold tracking-tight text-slate-900 dark:text-slate-50 whitespace-nowrap shrink-0"
           >
             JBL PartyBox 320
           </a>
 
-          {/* Zone 2: Clean Single-Line Navigation Links (up to 5 items) */}
+          {/* Zone 2: Clean Single-Line Navigation Links */}
           <nav
             aria-label="ניווט ראשי"
             className="hidden md:flex items-center gap-7 text-sm font-medium"
@@ -461,10 +513,10 @@ export default function App() {
                   key={item.id}
                   type="button"
                   onClick={() => setActiveTab(item.id)}
-                  className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+                  className={`py-1.5 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
                     active
-                      ? 'border-[#FF5500] text-white'
-                      : 'border-transparent text-slate-400 hover:text-white'
+                      ? 'border-[#D95B2B] text-slate-900 dark:text-white font-semibold'
+                      : 'border-transparent text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
                   }`}
                 >
                   {item.label}
@@ -478,9 +530,16 @@ export default function App() {
             <button
               type="button"
               onClick={() => setConnectionModalOpen(true)}
-              className="min-h-[40px] rounded-xl bg-[#FF5500] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#E64D00] whitespace-nowrap shrink-0"
+              className={`flex min-h-[42px] items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isSpeakerConnected
+                  ? 'bg-teal-600 hover:bg-teal-700'
+                  : 'bg-[#D95B2B] hover:bg-[#C24E22]'
+              }`}
             >
-              {system.connectionType === 'ble' ? 'מחובר ב-BLE' : 'חיבור לרמקול'}
+              <Bluetooth className="h-3.5 w-3.5" />
+              <span>
+                {isSpeakerConnected ? 'מחובר ב-Bluetooth' : 'חיבור בלוטוס לרמקול'}
+              </span>
             </button>
           </div>
         </div>
@@ -488,80 +547,101 @@ export default function App() {
 
       {/* Main Content Container */}
       <main id="top" className="mx-auto max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
-        {/* Contextual Intro + Direct Prominent APK Download Button */}
+        {/* Contextual Workspace Intro + Eye-Comfort Theme Switch + Direct APK/ZIP Download */}
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="font-display text-2xl font-bold tracking-tight text-white sm:text-3xl">
+            <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 sm:text-3xl">
               {system.deviceName}
             </h1>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-400">
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+              <span className="font-mono font-semibold text-slate-700 dark:text-slate-200 tabular-nums">
+                גרסה {APP_VERSION}
+              </span>
+              <span aria-hidden="true">·</span>
               <span>JBL Pro Sound</span>
               <span aria-hidden="true">·</span>
               <span>זוג וופרים 6.5״ + טוויטרים 25 מ״מ</span>
               <span aria-hidden="true">·</span>
               <span>תמיכה ב-Auracast™</span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums" dir="ltr">
-                FW 2.4.0
-              </span>
             </div>
           </div>
 
-          {!isNativeApk && (
-            <div className="flex flex-wrap items-center gap-2.5">
-              <button
-                type="button"
-                disabled={heroDownloading}
-                onClick={async () => {
-                  setHeroDownloading(true);
-                  const res = await triggerVerifiedZipDownload();
-                  setHeroDownloading(false);
-                  if (res.ok) {
-                    setHeroDownloadDone(true);
-                    window.setTimeout(() => setHeroDownloadDone(false), 5000);
-                  } else {
-                    setActiveTab(NavTab.ApkDownload);
-                  }
-                }}
-                className="flex min-h-[46px] items-center gap-2 rounded-xl bg-[#FF5500] px-5 py-2.5 text-sm font-bold text-white shadow-md shadow-[#FF5500]/20 transition-colors hover:bg-[#E64D00] disabled:opacity-75 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Download className="h-4 w-4" />
-                <span>
-                  {heroDownloading
-                    ? 'מוריד ארכיון ZIP...'
-                    : heroDownloadDone
-                      ? `ירד בהצלחה (${ZIP_FILE_NAME})`
-                      : 'הורדת קובץ ZIP (מכיל APK · 1.65 MB)'}
-                </span>
-              </button>
-
-              {!isInstalled && isInstallable ? (
-                <button
-                  type="button"
-                  onClick={install}
-                  className="min-h-[46px] rounded-xl border border-white/[0.12] bg-white/[0.04] px-3.5 py-2 text-xs font-semibold text-slate-200 transition-colors hover:bg-white/[0.09] whitespace-nowrap shrink-0"
-                >
-                  התקנת אפליקציה מהירה
-                </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Eye-Comfort Theme Mode Toggle */}
+            <button
+              type="button"
+              onClick={() => setIsDarkTheme((prev) => !prev)}
+              className="flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {isDarkTheme ? (
+                <>
+                  <Sun className="h-4 w-4 text-amber-400" />
+                  <span>תצוגת יום בהירה</span>
+                </>
               ) : (
+                <>
+                  <Moon className="h-4 w-4 text-slate-600" />
+                  <span>תצוגת ערב רכה</span>
+                </>
+              )}
+            </button>
+
+            {!isNativeApk && (
+              <>
                 <button
                   type="button"
-                  onClick={() =>
-                    setActiveTab(
-                      activeTab === NavTab.ApkDownload
-                        ? NavTab.Overview
-                        : NavTab.ApkDownload
-                    )
-                  }
-                  className="min-h-[46px] rounded-xl border border-white/[0.1] bg-white/[0.03] px-3.5 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-white/[0.08] whitespace-nowrap shrink-0"
+                  disabled={heroDownloading}
+                  onClick={async () => {
+                    setHeroDownloading(true);
+                    const res = await triggerVerifiedZipDownload();
+                    setHeroDownloading(false);
+                    if (res.ok) {
+                      setHeroDownloadDone(true);
+                      window.setTimeout(() => setHeroDownloadDone(false), 5000);
+                    } else {
+                      setActiveTab(NavTab.ApkDownload);
+                    }
+                  }}
+                  className="flex min-h-[44px] items-center gap-2 rounded-xl bg-[#D95B2B] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#C24E22] disabled:opacity-75 whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  {activeTab === NavTab.ApkDownload
-                    ? 'חזרה למרכז השליטה'
-                    : 'פרטי חבילה והתקנה'}
+                  <Download className="h-4 w-4" />
+                  <span>
+                    {heroDownloading
+                      ? 'מוריד ארכיון ZIP...'
+                      : heroDownloadDone
+                        ? `ירד בהצלחה (${ZIP_FILE_NAME})`
+                        : `הורדת APK / ZIP (גרסה ${APP_VERSION})`}
+                  </span>
                 </button>
-              )}
-            </div>
-          )}
+
+                {!isInstalled && isInstallable ? (
+                  <button
+                    type="button"
+                    onClick={install}
+                    className="min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    התקנה מהירה למכשיר
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveTab(
+                        activeTab === NavTab.ApkDownload
+                          ? NavTab.Overview
+                          : NavTab.ApkDownload
+                      )
+                    }
+                    className="min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    {activeTab === NavTab.ApkDownload
+                      ? 'חזרה למרכז השליטה'
+                      : 'ניהול GitHub והורדות'}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Real-Time Audio Source & Master Volume Strip */}
@@ -709,7 +789,7 @@ export default function App() {
 
       {/* Non-intrusive Offline Connectivity Toast */}
       {!isOnline && !isNativeApk && (
-        <div className="fixed bottom-20 left-4 z-40 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-[#141821] px-3.5 py-2 text-xs font-medium text-amber-300 shadow-lg md:bottom-5">
+        <div className="fixed bottom-20 left-4 z-40 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-medium text-amber-800 shadow-md dark:border-amber-500/40 dark:bg-[#1E2738] dark:text-amber-300 md:bottom-5">
           <WifiOff className="h-3.5 w-3.5" />
           <span>מצב לא מקוון — האפליקציה פועלת מהזיכרון המקומי</span>
         </div>
@@ -718,7 +798,7 @@ export default function App() {
       {/* Mobile Ergonomic Bottom Navigation Bar (< 15% Viewport Height) */}
       <nav
         aria-label="ניווט תחתון לנייד"
-        className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/[0.08] bg-[#0B0D11]/95 backdrop-blur-md md:hidden"
+        className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur-md dark:border-slate-700/80 dark:bg-[#1A2233]/95 md:hidden"
       >
         <div
           className={`grid h-16 items-center px-1.5 ${
@@ -734,7 +814,9 @@ export default function App() {
                 type="button"
                 onClick={() => setActiveTab(item.id)}
                 className={`flex min-h-[48px] flex-col items-center justify-center rounded-xl transition-colors ${
-                  active ? 'text-[#FF5500]' : 'text-slate-400 hover:text-slate-200'
+                  active
+                    ? 'text-[#D95B2B] font-semibold'
+                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >
                 <Icon className="h-5 w-5" />
@@ -747,26 +829,30 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Web Bluetooth & Device Configuration Sheet */}
+      {/* Bluetooth, Permissions & Speaker Configuration Sheet */}
       <ConnectionModal
         open={connectionModalOpen}
         system={system}
         onClose={() => setConnectionModalOpen(false)}
-        onConnectBle={(bleDeviceTitle) =>
+        onConnectSpeaker={(deviceTitle, mode, batteryLevel) =>
           setSystem((prev) => ({
             ...prev,
-            connectionType: 'ble',
-            bleDeviceTitle,
-            deviceName: bleDeviceTitle,
+            connectionType: mode,
+            bleDeviceTitle: deviceTitle,
+            deviceName: deviceTitle,
+            ...(typeof batteryLevel === 'number'
+              ? { batteryPercent: batteryLevel }
+              : {}),
           }))
         }
-        onSwitchToDemo={() =>
+        onSwitchToDemo={() => {
+          bluetoothBridge.disconnectBle();
           setSystem((prev) => ({
             ...prev,
             connectionType: 'demo',
             bleDeviceTitle: null,
-          }))
-        }
+          }));
+        }}
         onRenameSpeaker={(deviceName) =>
           setSystem((prev) => ({ ...prev, deviceName }))
         }

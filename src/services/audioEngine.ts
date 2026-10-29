@@ -5,6 +5,7 @@ import {
   DjPadEffectId,
   EQ_BANDS,
 } from '../types/speaker';
+import { bluetoothBridge } from './bluetoothBridge';
 
 export interface AudioAnalysisFrame {
   spectrum: number[]; // 28 normalized bars 0..1
@@ -188,11 +189,13 @@ class PartyBoxAudioEngine {
   public setEqGains(gains: number[]): void {
     this.currentGains = [...gains];
     this.applyDspSettings();
+    bluetoothBridge.syncHardwareEq(this.currentGains, this.currentBassBoost);
   }
 
   public setBassBoost(mode: BassBoostMode): void {
     this.currentBassBoost = mode;
     this.applyDspSettings();
+    bluetoothBridge.syncHardwareEq(this.currentGains, this.currentBassBoost);
   }
 
   public setEnvironment(env: AcousticEnvironment): void {
@@ -214,6 +217,31 @@ class PartyBoxAudioEngine {
     this.currentVolume = volume;
     this.currentMuted = muted;
     this.applyDspSettings();
+    bluetoothBridge.syncHardwareVolume(volume, muted);
+  }
+
+  public async setOutputSink(deviceId: string): Promise<boolean> {
+    try {
+      const ctx = this.ensureContext() as AudioContext & {
+        setSinkId?: (id: string) => Promise<void>;
+      };
+      if (typeof ctx.setSinkId === 'function') {
+        await ctx.setSinkId(deviceId);
+        return true;
+      }
+      if (this.audioElement) {
+        const el = this.audioElement as HTMLAudioElement & {
+          setSinkId?: (id: string) => Promise<void>;
+        };
+        if (typeof el.setSinkId === 'function') {
+          await el.setSinkId(deviceId);
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
   }
 
   /**

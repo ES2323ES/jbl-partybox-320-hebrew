@@ -53,21 +53,21 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
   return (
     <section
       aria-label="נגן שמע ובדיקת סאונד בזמן אמת"
-      className="rounded-2xl border border-white/[0.08] bg-[#12161E] p-4 sm:p-5"
+      className="rounded-2xl border border-slate-200/90 bg-white p-4 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-5"
     >
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        {/* Left/Right in RTL: Play Button + Source Title + Groove Selector */}
+        {/* Play Button + Groove Selector */}
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={onTogglePlay}
-            className="flex min-h-[44px] items-center gap-2 rounded-xl bg-[#FF5500] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#E64D00] whitespace-nowrap shrink-0"
+            className="flex min-h-[44px] items-center gap-2 rounded-xl bg-[#D95B2B] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#C24E22] whitespace-nowrap shrink-0 cursor-pointer"
           >
             {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
             <span>{isPlaying ? 'השהה שמע חי' : 'הפעל מנוע שמע'}</span>
           </button>
 
-          <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-[#0B0D11] p-1 border border-white/[0.06]">
+          <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200/80 bg-slate-100/90 p-1 dark:border-slate-700/70 dark:bg-[#141B27]">
             {GROOVE_OPTIONS.map((g) => {
               const active = sourceMode === 'groove' && currentGroove === g.id;
               return (
@@ -75,10 +75,10 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
                   key={g.id}
                   type="button"
                   onClick={() => onSelectGroove(g.id)}
-                  className={`min-h-[36px] rounded-lg px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  className={`min-h-[36px] rounded-lg px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     active
-                      ? 'bg-white/[0.12] text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-white'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
                   }`}
                 >
                   {g.label}
@@ -101,13 +101,13 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 sourceMode === 'file'
-                  ? 'border-[#FF5500]/60 bg-[#FF5500]/15 text-white'
-                  : 'border-white/[0.08] bg-white/[0.03] text-slate-300 hover:bg-white/[0.07]'
+                  ? 'border-[#D95B2B]/60 bg-[#D95B2B]/10 text-[#B84318] dark:text-white'
+                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 dark:hover:bg-slate-800'
               }`}
             >
-              <Upload className="h-3.5 w-3.5 text-[#FF5500]" />
+              <Upload className="h-3.5 w-3.5 text-[#D95B2B]" />
               <span className="max-w-[140px] truncate">
                 {sourceMode === 'file' && uploadedFileName
                   ? uploadedFileName
@@ -118,13 +118,13 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
             <button
               type="button"
               onClick={onStartMicSync}
-              className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 sourceMode === 'mic'
-                  ? 'border-[#FF5500]/60 bg-[#FF5500]/15 text-white'
-                  : 'border-white/[0.08] bg-white/[0.03] text-slate-300 hover:bg-white/[0.07]'
+                  ? 'border-[#D95B2B]/60 bg-[#D95B2B]/10 text-[#B84318] dark:text-white'
+                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 dark:hover:bg-slate-800'
               }`}
             >
-              <Mic className="h-3.5 w-3.5 text-[#FF5500]" />
+              <Mic className="h-3.5 w-3.5 text-[#D95B2B]" />
               <span>{sourceMode === 'mic' ? 'מאזין לקצב החדר' : 'סנכרון מיקרופון'}</span>
             </button>
           </div>
@@ -135,12 +135,12 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
               type="button"
               onClick={onToggleMute}
               aria-label={muted ? 'ביטול השתקה' : 'השתקה'}
-              className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-300 hover:bg-white/[0.06]"
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
             >
               {muted || volume === 0 ? (
-                <VolumeX className="h-4 w-4 text-rose-400" />
+                <VolumeX className="h-4 w-4 text-rose-500" />
               ) : (
-                <Volume2 className="h-4 w-4 text-slate-300" />
+                <Volume2 className="h-4 w-4 text-slate-600 dark:text-slate-300" />
               )}
             </button>
             <input
@@ -153,7 +153,7 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
               className="jbl-slider w-28 sm:w-32"
             />
             <span
-              className="w-10 text-left font-mono text-xs font-medium text-slate-300 tabular-nums"
+              className="w-10 text-left font-mono text-xs font-medium text-slate-700 dark:text-slate-200 tabular-nums"
               dir="ltr"
             >
               {muted ? '0%' : `${volume}%`}
@@ -164,13 +164,14 @@ export const AudioSourceBar: React.FC<AudioSourceBarProps> = ({
 
       {/* Subtle status row without pills */}
       {(sourceMode === 'file' || sourceMode === 'mic' || micError) && (
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2.5 text-xs text-slate-400">
-          <Music className="h-3.5 w-3.5 text-[#FF5500]" />
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/80 pt-2.5 text-xs text-slate-600 dark:border-slate-700/60 dark:text-slate-400">
+          <Music className="h-3.5 w-3.5 text-[#D95B2B]" />
           {micError ? (
-            <span className="text-amber-400">{micError}</span>
+            <span className="text-amber-700 dark:text-amber-300">{micError}</span>
           ) : sourceMode === 'file' ? (
             <span>
-              מנגן קובץ מקומי דרך מעבד ה-EQ והבס: <strong className="text-slate-200">{uploadedFileName}</strong>
+              מנגן קובץ מקומי דרך מעבד ה-EQ והבס:{' '}
+              <strong className="text-slate-900 dark:text-slate-100">{uploadedFileName}</strong>
             </span>
           ) : (
             <span>
