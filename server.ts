@@ -806,7 +806,7 @@ async function startServer() {
         },
         body: new URLSearchParams({
           client_id: GH_DEVICE_CLIENT_ID,
-          scope: 'repo workflow admin:public_key',
+          scope: 'repo workflow',
         }).toString(),
       });
 
