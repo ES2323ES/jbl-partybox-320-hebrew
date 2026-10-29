@@ -1,5 +1,4 @@
 import { execFileSync } from 'child_process';
-import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
@@ -12,9 +11,8 @@ const PORT = 3000;
 const APK_FILENAME = 'JBL-PartyBox-320-HE.apk';
 const ZIP_FILENAME = 'JBL-PartyBox-320-HE-APK.zip';
 const GH_DEVICE_CLIENT_ID = '178c6fc778ccc68e1d6a';
-const PUBLISHED_RESULT_FILE = '/tmp/gh_published_repo.json';
 
-interface DeviceFlowSession {
+interface PersistedDeviceSession {
   status:
     | 'idle'
     | 'awaiting_user'
@@ -22,43 +20,79 @@ interface DeviceFlowSession {
     | 'completed'
     | 'expired'
     | 'error';
+  deviceCode: string | null;
   userCode: string | null;
   verificationUri: string;
   repoName: string;
   isPrivate: boolean;
+  intervalSec: number;
   expiresAt: number | null;
+  accessToken: string | null;
   username: string | null;
   repoUrl: string | null;
   releaseUrl: string | null;
   error: string | null;
 }
 
-let deviceSession: DeviceFlowSession = {
+const DEFAULT_SESSION: PersistedDeviceSession = {
   status: 'idle',
+  deviceCode: null,
   userCode: null,
   verificationUri: 'https://github.com/login/device',
   repoName: 'jbl-partybox-320-hebrew',
   isPrivate: false,
+  intervalSec: 5,
   expiresAt: null,
+  accessToken: null,
   username: null,
   repoUrl: null,
   releaseUrl: null,
   error: null,
 };
 
-let activePollTimer: ReturnType<typeof setTimeout> | null = null;
-let connectedGithubToken: string | null = null;
-
-// Restore previous completed state if server restarted after publish
-try {
-  if (fs.existsSync(PUBLISHED_RESULT_FILE)) {
-    const saved = JSON.parse(fs.readFileSync(PUBLISHED_RESULT_FILE, 'utf-8'));
-    if (saved?.repoUrl) {
-      deviceSession = { ...deviceSession, ...saved, status: 'completed' };
-    }
+function getSessionFilePath(rootDir: string): string {
+  const gitDir = path.resolve(rootDir, '.git');
+  if (fs.existsSync(gitDir)) {
+    return path.join(gitDir, 'gh_device_session.json');
   }
-} catch {
-  // ignore
+  return '/tmp/gh_device_session.json';
+}
+
+function loadSession(rootDir: string): PersistedDeviceSession {
+  const file = getSessionFilePath(rootDir);
+  try {
+    if (fs.existsSync(file)) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return { ...DEFAULT_SESSION, ...raw };
+    }
+  } catch {
+    // ignore
+  }
+  return { ...DEFAULT_SESSION };
+}
+
+function saveSession(rootDir: string, session: PersistedDeviceSession): void {
+  const file = getSessionFilePath(rootDir);
+  try {
+    fs.writeFileSync(file, JSON.stringify(session, null, 2), 'utf-8');
+  } catch {
+    // ignore
+  }
+}
+
+function publicSessionView(s: PersistedDeviceSession) {
+  return {
+    status: s.status,
+    userCode: s.userCode,
+    verificationUri: s.verificationUri,
+    repoName: s.repoName,
+    isPrivate: s.isPrivate,
+    expiresAt: s.expiresAt,
+    username: s.username,
+    repoUrl: s.repoUrl,
+    releaseUrl: s.releaseUrl,
+    error: s.error,
+  };
 }
 
 async function ghFetch(
@@ -81,7 +115,6 @@ async function createAndPushGithubRepo(
   isPrivate: boolean,
   resolveStaticBinary: (name: string) => string | null
 ): Promise<{ username: string; repoUrl: string; releaseUrl: string | null }> {
-  // 1. Identify authenticated GitHub user
   const userRes = await ghFetch('https://api.github.com/user', token);
   if (!userRes.ok) {
     throw new Error(`אימות משתמש ב-GitHub נכשל (HTTP ${userRes.status})`);
@@ -95,7 +128,6 @@ async function createAndPushGithubRepo(
   const description =
     'אפליקציית שליטה ייעודית בעברית לרמקול JBL PartyBox Stage 320 כולל תאורת מופע, איקוולייזר 7 ערוצים וקובץ APK לאנדרואיד';
 
-  // 2. Create brand-new GitHub repository (fallback with suffix if name already exists)
   let repoInfo: { full_name: string; html_url: string } | null = null;
   const candidateNames = [
     cleanBaseName,
@@ -127,7 +159,10 @@ async function createAndPushGithubRepo(
         message?: string;
         errors?: Array<{ message?: string }>;
       };
-      lastErr = errJson.errors?.[0]?.message || errJson.message || `HTTP ${createRes.status}`;
+      lastErr =
+        errJson.errors?.[0]?.message ||
+        errJson.message ||
+        `HTTP ${createRes.status}`;
       if (createRes.status !== 422) {
         break;
       }
@@ -140,7 +175,6 @@ async function createAndPushGithubRepo(
 
   const fullName = repoInfo.full_name;
 
-  // 3. Ensure local git commit is up to date and push full repo to main
   try {
     execFileSync('git', ['add', '-A'], { cwd: rootDir, stdio: 'ignore' });
     execFileSync(
@@ -149,7 +183,7 @@ async function createAndPushGithubRepo(
       { cwd: rootDir, stdio: 'ignore' }
     );
   } catch {
-    // Working tree already clean — proceed to push
+    // Working tree already clean
   }
 
   const pushUrl = `https://x-access-token:${encodeURIComponent(token)}@github.com/${fullName}.git`;
@@ -158,7 +192,7 @@ async function createAndPushGithubRepo(
     stdio: 'pipe',
   });
 
-  // 4. Create GitHub Release v1.0.0 with signed APK & ZIP assets
+  // Create GitHub Release v1.0.0 with signed APK & ZIP assets
   let releaseUrl: string | null = null;
   const releaseRes = await ghFetch(
     `https://api.github.com/repos/${fullName}/releases`,
@@ -232,6 +266,10 @@ async function startServer() {
   app.use(express.json());
   const rootDir = import.meta.dirname;
 
+  let deviceSession = loadSession(rootDir);
+  let activePollTimer: ReturnType<typeof setTimeout> | null = null;
+  let isCheckingNow = false;
+
   const resolveStaticBinary = (fileName: string): string | null => {
     const publicFile = path.resolve(rootDir, 'public', fileName);
     if (fs.existsSync(publicFile)) return publicFile;
@@ -239,6 +277,122 @@ async function startServer() {
     if (fs.existsSync(distFile)) return distFile;
     return null;
   };
+
+  const checkAndPublishOnce = async (): Promise<void> => {
+    if (isCheckingNow) return;
+    deviceSession = loadSession(rootDir);
+
+    if (deviceSession.status !== 'awaiting_user' || !deviceSession.deviceCode) {
+      return;
+    }
+
+    if (deviceSession.expiresAt && Date.now() > deviceSession.expiresAt) {
+      deviceSession.status = 'expired';
+      deviceSession.error = 'פג תוקף קוד האישור — לחץ להפקת קוד חדש.';
+      saveSession(rootDir, deviceSession);
+      return;
+    }
+
+    isCheckingNow = true;
+    try {
+      const tokenRes = await fetch(
+        'https://github.com/login/oauth/access_token',
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            client_id: GH_DEVICE_CLIENT_ID,
+            device_code: deviceSession.deviceCode,
+            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          }).toString(),
+        }
+      );
+
+      const tokenData = (await tokenRes.json()) as {
+        access_token?: string;
+        error?: string;
+      };
+
+      if (tokenData.access_token) {
+        deviceSession.accessToken = tokenData.access_token;
+        deviceSession.status = 'publishing';
+        saveSession(rootDir, deviceSession);
+
+        try {
+          const out = await createAndPushGithubRepo(
+            rootDir,
+            tokenData.access_token,
+            deviceSession.repoName,
+            deviceSession.isPrivate,
+            resolveStaticBinary
+          );
+          deviceSession = {
+            ...deviceSession,
+            status: 'completed',
+            username: out.username,
+            repoUrl: out.repoUrl,
+            releaseUrl: out.releaseUrl,
+            error: null,
+          };
+          saveSession(rootDir, deviceSession);
+        } catch (pubErr) {
+          deviceSession = {
+            ...deviceSession,
+            status: 'error',
+            error:
+              pubErr instanceof Error
+                ? pubErr.message
+                : 'שגיאה ביצירת המאגר ב-GitHub',
+          };
+          saveSession(rootDir, deviceSession);
+        }
+        return;
+      }
+
+      if (tokenData.error === 'slow_down') {
+        deviceSession.intervalSec = (deviceSession.intervalSec || 5) + 5;
+        saveSession(rootDir, deviceSession);
+      } else if (
+        tokenData.error === 'expired_token' ||
+        tokenData.error === 'access_denied'
+      ) {
+        deviceSession.status = 'expired';
+        deviceSession.error =
+          tokenData.error === 'access_denied'
+            ? 'האישור בוטל על ידי המשתמש.'
+            : 'פג תוקף הקוד — לחץ ליצירת קוד חדש.';
+        saveSession(rootDir, deviceSession);
+        return;
+      }
+    } catch {
+      // network hiccup, retry next tick
+    } finally {
+      isCheckingNow = false;
+    }
+
+    scheduleNextPoll();
+  };
+
+  const scheduleNextPoll = () => {
+    if (activePollTimer) {
+      clearTimeout(activePollTimer);
+      activePollTimer = null;
+    }
+    if (deviceSession.status === 'awaiting_user') {
+      const waitMs = Math.max(5500, (deviceSession.intervalSec || 5) * 1000 + 500);
+      activePollTimer = setTimeout(() => {
+        checkAndPublishOnce().catch(() => {});
+      }, waitMs);
+    }
+  };
+
+  // Automatically resume polling on boot if a pending device session exists on disk!
+  if (deviceSession.status === 'awaiting_user' && deviceSession.deviceCode) {
+    scheduleNextPoll();
+  }
 
   const makeBinaryHandler = (
     fileName: string,
@@ -273,7 +427,6 @@ async function startServer() {
     'application/vnd.android.package-archive'
   );
 
-  // Direct ZIP & APK download endpoints
   app.get('/api/download-zip', serveZip);
   app.head('/api/download-zip', serveZip);
   app.get(`/${ZIP_FILENAME}`, serveZip);
@@ -296,42 +449,41 @@ async function startServer() {
     res.status(404).json({ error: 'Metadata not found' });
   });
 
-  // --- GitHub Device Flow Automatic Repo Creator & Pusher ---
+  app.get('/api/github/device/state', async (_req, res) => {
+    deviceSession = loadSession(rootDir);
+    res.json(publicSessionView(deviceSession));
+  });
 
-  app.get('/api/github/device/state', (_req, res) => {
-    if (
-      deviceSession.status === 'awaiting_user' &&
-      deviceSession.expiresAt &&
-      Date.now() > deviceSession.expiresAt
-    ) {
-      deviceSession.status = 'expired';
-    }
-    res.json(deviceSession);
+  // Explicit sync endpoint (triggers immediate check + publish if user already approved)
+  app.post('/api/github/device/sync', async (_req, res) => {
+    await checkAndPublishOnce();
+    deviceSession = loadSession(rootDir);
+    res.json(publicSessionView(deviceSession));
   });
 
   app.post('/api/github/device/start', async (req, res) => {
+    deviceSession = loadSession(rootDir);
     const repoName =
       typeof req.body?.repoName === 'string' && req.body.repoName.trim()
         ? req.body.repoName.trim()
         : 'jbl-partybox-320-hebrew';
     const isPrivate = Boolean(req.body?.isPrivate);
 
-    // If already authenticated via previous session or GITHUB_TOKEN env, publish immediately!
-    const existingToken = connectedGithubToken || process.env.GITHUB_TOKEN?.trim() || null;
+    const existingToken =
+      deviceSession.accessToken || process.env.GITHUB_TOKEN?.trim() || null;
+
     if (existingToken && req.body?.forceNewAuth !== true) {
       deviceSession = {
+        ...deviceSession,
         status: 'publishing',
-        userCode: null,
-        verificationUri: 'https://github.com/login/device',
         repoName,
         isPrivate,
-        expiresAt: null,
-        username: deviceSession.username,
         repoUrl: null,
         releaseUrl: null,
         error: null,
       };
-      res.json(deviceSession);
+      saveSession(rootDir, deviceSession);
+      res.json(publicSessionView(deviceSession));
 
       createAndPushGithubRepo(
         rootDir,
@@ -349,7 +501,7 @@ async function startServer() {
             releaseUrl: out.releaseUrl,
             error: null,
           };
-          fs.writeFileSync(PUBLISHED_RESULT_FILE, JSON.stringify(deviceSession, null, 2));
+          saveSession(rootDir, deviceSession);
         })
         .catch((err) => {
           deviceSession = {
@@ -357,13 +509,9 @@ async function startServer() {
             status: 'error',
             error: err instanceof Error ? err.message : 'שגיאה בהעלאה ל-GitHub',
           };
+          saveSession(rootDir, deviceSession);
         });
       return;
-    }
-
-    if (activePollTimer) {
-      clearTimeout(activePollTimer);
-      activePollTimer = null;
     }
 
     try {
@@ -392,125 +540,29 @@ async function startServer() {
         interval: number;
       };
 
-      const expiresAt = Date.now() + codeData.expires_in * 1000;
-      let pollIntervalMs = Math.max(5500, (codeData.interval || 5) * 1000 + 500);
-
       deviceSession = {
         status: 'awaiting_user',
+        deviceCode: codeData.device_code,
         userCode: codeData.user_code,
-        verificationUri: codeData.verification_uri || 'https://github.com/login/device',
+        verificationUri:
+          codeData.verification_uri || 'https://github.com/login/device',
         repoName,
         isPrivate,
-        expiresAt,
+        intervalSec: codeData.interval || 5,
+        expiresAt: Date.now() + codeData.expires_in * 1000,
+        accessToken: null,
         username: null,
         repoUrl: null,
         releaseUrl: null,
         error: null,
       };
+      saveSession(rootDir, deviceSession);
+      scheduleNextPoll();
 
-      const pollOnce = async () => {
-        if (deviceSession.status !== 'awaiting_user') return;
-        if (Date.now() > expiresAt) {
-          deviceSession.status = 'expired';
-          return;
-        }
-
-        try {
-          const tokenRes = await fetch(
-            'https://github.com/login/oauth/access_token',
-            {
-              method: 'POST',
-              headers: {
-                Accept: 'application/json',
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              body: new URLSearchParams({
-                client_id: GH_DEVICE_CLIENT_ID,
-                device_code: codeData.device_code,
-                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-              }).toString(),
-            }
-          );
-
-          const tokenData = (await tokenRes.json()) as {
-            access_token?: string;
-            error?: string;
-          };
-
-          if (tokenData.access_token) {
-            connectedGithubToken = tokenData.access_token;
-            deviceSession.status = 'publishing';
-
-            try {
-              const out = await createAndPushGithubRepo(
-                rootDir,
-                tokenData.access_token,
-                deviceSession.repoName,
-                deviceSession.isPrivate,
-                resolveStaticBinary
-              );
-              deviceSession = {
-                ...deviceSession,
-                status: 'completed',
-                username: out.username,
-                repoUrl: out.repoUrl,
-                releaseUrl: out.releaseUrl,
-                error: null,
-              };
-              fs.writeFileSync(
-                PUBLISHED_RESULT_FILE,
-                JSON.stringify(deviceSession, null, 2)
-              );
-            } catch (pubErr) {
-              deviceSession = {
-                ...deviceSession,
-                status: 'error',
-                error:
-                  pubErr instanceof Error
-                    ? pubErr.message
-                    : 'שגיאה ביצירת המאגר ב-GitHub',
-              };
-            }
-            return;
-          }
-
-          if (tokenData.error === 'slow_down') {
-            pollIntervalMs += 5000;
-          } else if (
-            tokenData.error === 'expired_token' ||
-            tokenData.error === 'access_denied'
-          ) {
-            deviceSession = {
-              ...deviceSession,
-              status: 'expired',
-              error:
-                tokenData.error === 'access_denied'
-                  ? 'האישור בוטל על ידי המשתמש.'
-                  : 'פג תוקף הקוד — לחץ ליצירת קוד חדש.',
-            };
-            return;
-          }
-        } catch {
-          // transient network error, continue polling
-        }
-
-        activePollTimer = setTimeout(pollOnce, pollIntervalMs);
-      };
-
-      activePollTimer = setTimeout(pollOnce, pollIntervalMs);
-      res.json(deviceSession);
+      res.json(publicSessionView(deviceSession));
     } catch {
       res.status(500).json({ error: 'שגיאה ביצירת חיבור מול GitHub' });
     }
-  });
-
-  // Also keep /api/github/status for compatibility
-  app.get('/api/github/status', (_req, res) => {
-    res.json({
-      connected: Boolean(connectedGithubToken || process.env.GITHUB_TOKEN?.trim()),
-      username: deviceSession.username,
-      deviceSession,
-    });
   });
 
   if (process.env.NODE_ENV !== 'production') {
