@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import {
   Bluetooth,
   CheckCircle2,
+  ClipboardList,
   ExternalLink,
+  Radio,
   RefreshCw,
   ShieldCheck,
   Speaker,
@@ -11,6 +13,7 @@ import {
 } from 'lucide-react';
 import { SpeakerSystemState } from '../types/speaker';
 import {
+  LightingChannelDiagnostics,
   PairedBluetoothDevice,
   SpeakerPermissionState,
   bluetoothBridge,
@@ -28,6 +31,7 @@ interface ConnectionModalProps {
   ) => void;
   onSwitchToDemo: () => void;
   onRenameSpeaker: (newName: string) => void;
+  onOpenFaultLog: () => void;
 }
 
 export const ConnectionModal: React.FC<ConnectionModalProps> = ({
@@ -37,6 +41,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   onConnectSpeaker,
   onSwitchToDemo,
   onRenameSpeaker,
+  onOpenFaultLog,
 }) => {
   const [scanning, setScanning] = useState(false);
   const [requestingPerms, setRequestingPerms] = useState(false);
@@ -44,6 +49,9 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
   const [nameInput, setNameInput] = useState(system.deviceName);
   const [permState, setPermState] = useState<SpeakerPermissionState>(() =>
     bluetoothBridge.getPermissionState()
+  );
+  const [diag, setDiag] = useState<LightingChannelDiagnostics>(() =>
+    bluetoothBridge.getLightingDiagnostics()
   );
   const [pairedAndroidDevices, setPairedAndroidDevices] = useState<
     PairedBluetoothDevice[]
@@ -55,6 +63,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 
   const refreshBridgeData = () => {
     setPermState(bluetoothBridge.getPermissionState());
+    setDiag(bluetoothBridge.getLightingDiagnostics());
     setPairedAndroidDevices(bluetoothBridge.getPairedAndroidSpeakers());
     bluetoothBridge.listAudioOutputDevices().then(setAudioOutputs);
   };
@@ -63,11 +72,17 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
     if (!open) return;
     setNameInput(system.deviceName);
     refreshBridgeData();
-    const unsub = bluetoothBridge.onPermissionsChanged((st) => {
+    const unsubPerms = bluetoothBridge.onPermissionsChanged((st) => {
       setPermState(st);
       setPairedAndroidDevices(bluetoothBridge.getPairedAndroidSpeakers());
     });
-    return unsub;
+    const unsubDiag = bluetoothBridge.onDiagnosticsChanged(() => {
+      setDiag(bluetoothBridge.getLightingDiagnostics());
+    });
+    return () => {
+      unsubPerms();
+      unsubDiag();
+    };
   }, [open, system.deviceName]);
 
   if (!open) return null;
@@ -91,6 +106,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
       onSwitchToDemo();
     });
     setScanning(false);
+    setDiag(bluetoothBridge.getLightingDiagnostics());
     setStatusMessage(res.message);
     if (res.ok && res.deviceName) {
       onConnectSpeaker(
@@ -99,6 +115,15 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
         res.batteryLevel
       );
     }
+  };
+
+  const handleSelectPairedAndroidDevice = (dev: PairedBluetoothDevice) => {
+    const ctrl = bluetoothBridge.connectAndroidSpeakerControl(
+      dev.address || dev.name
+    );
+    setDiag(bluetoothBridge.getLightingDiagnostics());
+    onConnectSpeaker(dev.name, 'android_bt');
+    setStatusMessage(ctrl.message);
   };
 
   const handleSelectOutputSink = async (deviceId: string) => {
@@ -130,7 +155,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
       aria-modal="true"
       aria-labelledby="connection-modal-title"
     >
-      <div className="neon-surface max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-[#1E2738] sm:rounded-2xl">
+      <div className="neon-surface max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-[#1E2738] sm:rounded-2xl">
         {/* Mobile drag handle */}
         <div className="mx-auto mb-4 h-1.5 w-10 rounded-full bg-slate-300 dark:bg-slate-600 sm:hidden" />
 
@@ -141,7 +166,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               id="connection-modal-title"
               className="font-display text-lg font-semibold text-slate-900 dark:text-white"
             >
-              חיבור בלוטוס והרשאות רמקול
+              חיבור בלוטוס, תאורה והרשאות רמקול
             </h2>
           </div>
           <button
@@ -155,7 +180,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
         </div>
 
         <div className="mt-5 space-y-5">
-          {/* Active Speaker Status */}
+          {/* Active Speaker & Lighting Channel Status */}
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-[#141B27]">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
@@ -167,13 +192,40 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
                 <span>
                   {isConnected
                     ? `מחובר (${system.bleDeviceTitle || system.deviceName})`
-                    : 'מוכן להזרמת שמע'}
+                    : 'מוכן לחיבור'}
                 </span>
               </span>
             </div>
-            <p className="mt-2 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-              האפליקציה כוללת הרשאות מלאות ל-Bluetooth (סריקה, חיבור וזיווג), בקרת עוצמת שמע חומרתית, מיקרופון לסנכרון קצב ומעבד איקוולייזר 7 ערוצים הפועל בזמן אמת מול הרמקול הנייד.
-            </p>
+
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200/80 pt-2.5 text-xs dark:border-slate-700/60">
+              <span className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                <Radio
+                  className={`h-3.5 w-3.5 ${
+                    diag.connected ? 'text-teal-500' : 'text-amber-500'
+                  }`}
+                />
+                <span>
+                  ערוץ בקרת תאורה:{' '}
+                  <strong>
+                    {diag.connected
+                      ? `פעיל (${diag.packetsSent} פקודות שודרו)`
+                      : 'ממתין לסריקה / בחירת רמקול'}
+                  </strong>
+                </span>
+              </span>
+
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenFaultLog();
+                }}
+                className="inline-flex items-center gap-1 font-semibold text-[#D95B2B] hover:underline cursor-pointer"
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span>פתח יומן תקלות</span>
+              </button>
+            </div>
           </div>
 
           {/* Step 1: Hardware Permissions Check & Grant */}
@@ -181,7 +233,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
                 <ShieldCheck className="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                <span>הרשאות Bluetooth, מיקום סריקה ושמע</span>
+                <span>הרשאות Bluetooth, תאורת BLE וסינכרון נגן</span>
               </div>
               <span className="text-[11px] text-slate-500 dark:text-slate-400">
                 {permState.bluetoothConnect && permState.bluetoothScan
@@ -196,11 +248,11 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                סריקת מכשירים קרובים: <strong>{permState.bluetoothScan ? 'מאושר' : 'ממתין'}</strong>
+                סריקת BLE: <strong>{permState.bluetoothScan ? 'מאושר' : 'ממתין'}</strong>
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                שמע ומיקרופון: <strong>{permState.microphone ? 'מאושר' : 'זמין'}</strong>
+                סינכרון שמע ונגן: <strong>{permState.microphone ? 'מאושר' : 'זמין'}</strong>
               </span>
               <span aria-hidden="true">·</span>
               <span>
@@ -218,7 +270,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               <span>
                 {requestingPerms
                   ? 'מבקש הרשאות מערכת...'
-                  : 'אשר והפעל את כל ההרשאות לרמקול (Bluetooth + שמע)'}
+                  : 'אשר והפעל את כל ההרשאות לרמקול (Bluetooth + תאורה + נגן)'}
               </span>
             </button>
           </div>
@@ -228,7 +280,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
             <div className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-[#141B27]">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-900 dark:text-white">
-                  רמקולי Bluetooth מזווגים במכשיר האנדרואיד
+                  רמקולי Bluetooth מזווגים במכשיר האנדרואיד (שמע + בקרת תאורה)
                 </span>
                 <button
                   type="button"
@@ -250,13 +302,8 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
                     <button
                       key={dev.address || dev.name}
                       type="button"
-                      onClick={() => {
-                        onConnectSpeaker(dev.name, 'android_bt');
-                        setStatusMessage(
-                          `מחובר לרמקול "${dev.name}" — השמע, הווליום והאיקוולייזר מסונכרנים.`
-                        );
-                      }}
-                      className="flex min-h-[44px] w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-right text-xs hover:border-[#D95B2B] dark:border-slate-700 dark:bg-[#1E2738] cursor-pointer"
+                      onClick={() => handleSelectPairedAndroidDevice(dev)}
+                      className="flex min-h-[46px] w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-right text-xs hover:border-[#D95B2B] dark:border-slate-700 dark:bg-[#1E2738] cursor-pointer"
                     >
                       <div>
                         <div className="font-semibold text-slate-900 dark:text-white">
@@ -266,8 +313,10 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
                           {dev.address}
                         </div>
                       </div>
-                      <span className="font-medium text-[#D95B2B]">
-                        {dev.isActiveAudioRoute ? 'פעיל כעת בשמע' : 'בחר רמקול'}
+                      <span className="font-semibold text-[#D95B2B]">
+                        {dev.isActiveAudioRoute
+                          ? 'פעיל כעת — חבר תאורה'
+                          : 'חבר שמע ותאורה'}
                       </span>
                     </button>
                   ))}
@@ -296,7 +345,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               >
                 <Bluetooth className="h-4 w-4" />
                 <span>
-                  {scanning ? 'סורק רמקולי JBL...' : 'סרוק רמקול JBL PartyBox'}
+                  {scanning ? 'סורק ערוצי תאורה ברמקול...' : 'סרוק וחבר רמקול JBL PartyBox'}
                 </span>
               </button>
 

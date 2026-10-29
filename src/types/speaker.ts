@@ -3,6 +3,8 @@ export enum NavTab {
   Lightshow = 'lightshow',
   Equalizer = 'equalizer',
   PartyFx = 'party_fx',
+  UserGuide = 'user_guide',
+  FaultLog = 'fault_log',
   ApkDownload = 'apk_download',
 }
 
@@ -44,6 +46,10 @@ export enum AuracastMode {
   Stereo = 'stereo',
   PartyBroadcast = 'party_broadcast',
 }
+
+export type LightingProtocolMode = 'auto_dual' | 'harman_aa' | 'gatt_raw';
+
+export type AudioSyncSourceMode = 'player_sync' | 'system_audio' | 'groove';
 
 export type LightZoneKey =
   | 'rings'
@@ -108,7 +114,7 @@ export interface MicGuitarState {
   liveKaraokeActive?: boolean;
 }
 
-export const APP_VERSION = '0.2.3';
+export const APP_VERSION = '0.2.4';
 
 export interface SpeakerSystemState {
   deviceName: string;
@@ -122,6 +128,7 @@ export interface SpeakerSystemState {
   stereoChannel: 'L' | 'R';
   autoReconnect: boolean;
   notificationControlsEnabled: boolean;
+  lightingProtocol?: LightingProtocolMode;
 }
 
 export type DemoGrooveId =
@@ -162,12 +169,6 @@ export interface PartySceneDefinition {
   echo?: number;
 }
 
-export interface PlaylistTrack {
-  id: string;
-  name: string;
-  url: string;
-}
-
 export interface CustomSamplerSlot {
   slotIndex: number; // 0..3
   label: string;
@@ -183,6 +184,27 @@ export interface FullBackupBundle {
   micGuitar: MicGuitarState;
   savedProfiles: SavedEqProfile[];
   customSamples?: CustomSamplerSlot[];
+}
+
+export type FaultSeverity = 'error' | 'warning' | 'success' | 'info';
+
+export type FaultCategory =
+  | 'bluetooth'
+  | 'lighting'
+  | 'audio_sync'
+  | 'permissions'
+  | 'system';
+
+export interface FaultLogEntry {
+  id: string;
+  timestampIso: string;
+  timeFormatted: string;
+  severity: FaultSeverity;
+  category: FaultCategory;
+  title: string;
+  details: string;
+  suggestionHe?: string;
+  technicalCode?: string;
 }
 
 export const EQ_BANDS: EqBandDefinition[] = [

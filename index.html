@@ -13,12 +13,12 @@
     <title>JBL PartyBox 320 — מרכז שליטה</title>
     <meta
       name="description"
-      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, חיבור Bluetooth ואפקטי מסיבה."
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 (גרסה 0.2.4) עם שליטה מלאה בתאורת מופע וניאון, סינכרון אוטומטי לנגן המוזיקה ללא העלאת שירים, איקוולייזר 7 ערוצים, מדריך למשתמש ויומן תקלות."
     />
-    <meta property="og:title" content="JBL PartyBox 320 — מרכז שליטה" />
+    <meta property="og:title" content="JBL PartyBox 320 — מרכז שליטה (0.2.4)" />
     <meta
       property="og:description"
-      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, חיבור Bluetooth ואפקטי מסיבה."
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע וניאון, סינכרון אוטומטי לנגן המוזיקה ללא העלאת שירים, איקוולייזר 7 ערוצים, מדריך למשתמש ויומן תקלות."
     />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -30,7 +30,9 @@
     />
     <script>
       try {
-        var savedTheme = localStorage.getItem('jbl_pb320_theme_v2');
+        var savedTheme =
+          localStorage.getItem('jbl_pb320_theme_v3') ||
+          localStorage.getItem('jbl_pb320_theme_v2');
         if (savedTheme === 'neon') {
           document.documentElement.classList.add('dark', 'theme-neon');
         } else if (savedTheme === 'dark') {
@@ -42,7 +44,7 @@
       } catch (e) {}
     </script>
   </head>
-  <body class="bg-[#F4F6FA] text-slate-800 dark:bg-[#161D2B] dark:text-slate-100 antialiased selection:bg-[#D95B2B]/20 selection:text-[#D95B2B] transition-colors duration-200">
+  <body class="min-h-dvh overflow-x-clip bg-[#F4F6FA] text-slate-800 dark:bg-[#161D2B] dark:text-slate-100 antialiased selection:bg-[#D95B2B]/20 selection:text-[#D95B2B]">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

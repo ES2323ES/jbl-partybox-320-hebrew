@@ -1,12 +1,13 @@
 import {
   AcousticEnvironment,
+  AudioSyncSourceMode,
   BassBoostMode,
   DemoGrooveId,
   DjPadEffectId,
   EQ_BANDS,
-  PlaylistTrack,
 } from '../types/speaker';
 import { bluetoothBridge } from './bluetoothBridge';
+import { faultLogger } from './faultLogger';
 
 export interface AudioAnalysisFrame {
   spectrum: number[]; // 28 normalized bars 0..1
@@ -14,8 +15,10 @@ export interface AudioAnalysisFrame {
   midEnergy: number; // 0..1
   highEnergy: number; // 0..1
   isBeat: boolean;
+  detectedBpm: number; // 0 when idle, 70..180 when active rhythm detected
   djFlare: number; // 0..1 decaying flare triggered by DJ pads
   karaokeVoiceLevel: number; // 0..1 live vocal mic energy
+  externalMusicActive: boolean;
 }
 
 export interface RoomCalibrationResult {
@@ -37,28 +40,19 @@ class PartyBoxAudioEngine {
   private analyser: AnalyserNode | null = null;
   private freqData: Uint8Array<ArrayBuffer> | null = null;
 
-  // Sources & Dual-Deck Crossfade Playlist
-  private sourceMode: 'groove' | 'file' | 'mic' = 'groove';
+  // Live External Player Sync & Studio Test State (Zero Song Upload!)
+  private sourceMode: AudioSyncSourceMode = 'player_sync';
   private isPlaying = false;
   private currentGroove: DemoGrooveId = 'house_124';
   private grooveTimer: number | null = null;
   private stepIndex = 0;
+  private stateListeners = new Set<() => void>();
 
-  private deckA: HTMLAudioElement | null = null;
-  private deckB: HTMLAudioElement | null = null;
-  private deckAGain: GainNode | null = null;
-  private deckBGain: GainNode | null = null;
-  private activeDeck: 'A' | 'B' = 'A';
-  private isCrossfadingNow = false;
-  private crossfadeEnabled = true;
-  private playlist: PlaylistTrack[] = [];
-  private playlistIndex = 0;
-  private uploadedFileName: string | null = null;
-  private playlistListeners = new Set<() => void>();
-
-  // Ambient Mic Beat Sync
-  private micStream: MediaStream | null = null;
-  private micSource: MediaStreamAudioSourceNode | null = null;
+  // External Player Capture Streams (Acoustic Room/Player Sync or Direct System Audio)
+  private syncStream: MediaStream | null = null;
+  private syncSource: MediaStreamAudioSourceNode | null = null;
+  private syncAnalyser: AnalyserNode | null = null;
+  private syncFreqData: Uint8Array<ArrayBuffer> | null = null;
 
   // Live Karaoke Mic Chain + Voice-Activated MC Auto-Ducking
   private karaokeStream: MediaStream | null = null;
@@ -80,10 +74,14 @@ class PartyBoxAudioEngine {
   // Custom 4-Slot Sampler MediaRecorder
   private activeRecorder: MediaRecorder | null = null;
 
-  // Beat & DJ flare tracking
+  // Beat, BPM & DJ flare tracking (zero-GC preallocated buffers)
+  private reusableSpectrum: number[] = new Array(28).fill(0.03);
   private prevBassAvg = 0;
   private lastBeatTime = 0;
+  private beatIntervalsMs: number[] = [];
+  private detectedBpm = 0;
   private djFlareValue = 0;
+  private beatListeners = new Set<(energy: number) => void>();
 
   // Stored DSP settings for pre-init sync
   private currentGains: number[] = [4.5, 3.0, -0.5, 0.0, 1.5, 3.0, 4.0];
@@ -93,6 +91,24 @@ class PartyBoxAudioEngine {
   private currentPlaytimeBoost = false;
   private currentVolume = 72;
   private currentMuted = false;
+
+  public onStateChange(cb: () => void): () => void {
+    this.stateListeners.add(cb);
+    return () => {
+      this.stateListeners.delete(cb);
+    };
+  }
+
+  public onBeatDetected(cb: (energy: number) => void): () => void {
+    this.beatListeners.add(cb);
+    return () => {
+      this.beatListeners.delete(cb);
+    };
+  }
+
+  private notifyStateChanged(): void {
+    this.stateListeners.forEach((cb) => cb());
+  }
 
   private ensureContext(): AudioContext {
     if (!this.ctx) {
@@ -142,10 +158,10 @@ class PartyBoxAudioEngine {
       this.masterGain = this.ctx.createGain();
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 256;
-      this.analyser.smoothingTimeConstant = 0.76;
+      this.analyser.smoothingTimeConstant = 0.74;
       this.freqData = new Uint8Array(this.analyser.frequencyBinCount);
 
-      // Music chain: musicDuckGain -> eq[0..6] -> bassBoost -> envLow -> envHigh -> compressor -> analyser -> masterGain -> destination
+      // Output chain: musicDuckGain -> eq[0..6] -> bassBoost -> envLow -> envHigh -> compressor -> analyser -> masterGain -> destination
       this.musicDuckGain.connect(this.eqFilters[0]);
       for (let i = 0; i < this.eqFilters.length - 1; i++) {
         this.eqFilters[i].connect(this.eqFilters[i + 1]);
@@ -173,126 +189,6 @@ class PartyBoxAudioEngine {
     return this.musicDuckGain!;
   }
 
-  private ensureDecks(): void {
-    const ctx = this.ensureContext();
-    if (!this.deckA) {
-      this.deckA = new Audio();
-      this.deckA.crossOrigin = 'anonymous';
-      this.deckAGain = ctx.createGain();
-      this.deckAGain.gain.value = 1;
-      const srcA = ctx.createMediaElementSource(this.deckA);
-      srcA.connect(this.deckAGain);
-      this.deckAGain.connect(this.getChainInput());
-
-      this.deckA.addEventListener('timeupdate', () => this.handleDeckTimeUpdate('A'));
-      this.deckA.addEventListener('ended', () => this.handleDeckEnded('A'));
-    }
-
-    if (!this.deckB) {
-      this.deckB = new Audio();
-      this.deckB.crossOrigin = 'anonymous';
-      this.deckBGain = ctx.createGain();
-      this.deckBGain.gain.value = 0;
-      const srcB = ctx.createMediaElementSource(this.deckB);
-      srcB.connect(this.deckBGain);
-      this.deckBGain.connect(this.getChainInput());
-
-      this.deckB.addEventListener('timeupdate', () => this.handleDeckTimeUpdate('B'));
-      this.deckB.addEventListener('ended', () => this.handleDeckEnded('B'));
-    }
-  }
-
-  private notifyPlaylistChanged(): void {
-    this.playlistListeners.forEach((cb) => cb());
-  }
-
-  public onPlaylistChange(cb: () => void): () => void {
-    this.playlistListeners.add(cb);
-    return () => {
-      this.playlistListeners.delete(cb);
-    };
-  }
-
-  private handleDeckTimeUpdate(deck: 'A' | 'B'): void {
-    if (this.sourceMode !== 'file' || deck !== this.activeDeck || !this.isPlaying) {
-      return;
-    }
-    const el = deck === 'A' ? this.deckA : this.deckB;
-    if (!el || !Number.isFinite(el.duration) || el.duration <= 6) return;
-
-    const remaining = el.duration - el.currentTime;
-    if (
-      this.crossfadeEnabled &&
-      this.playlist.length > 1 &&
-      remaining <= 3.2 &&
-      !this.isCrossfadingNow
-    ) {
-      const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
-      this.crossfadeToTrack(nextIdx, 3.0);
-    }
-  }
-
-  private handleDeckEnded(deck: 'A' | 'B'): void {
-    if (this.sourceMode !== 'file' || deck !== this.activeDeck) return;
-    if (this.playlist.length <= 1) {
-      const el = deck === 'A' ? this.deckA : this.deckB;
-      if (el) {
-        el.currentTime = 0;
-        el.play().catch(() => {});
-      }
-      return;
-    }
-    if (!this.isCrossfadingNow) {
-      const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
-      this.playPlaylistTrack(nextIdx).catch(() => {});
-    }
-  }
-
-  private crossfadeToTrack(nextIndex: number, fadeSeconds: number): void {
-    if (!this.ctx || !this.deckA || !this.deckB || !this.deckAGain || !this.deckBGain) {
-      return;
-    }
-    const track = this.playlist[nextIndex];
-    if (!track) return;
-
-    this.isCrossfadingNow = true;
-    const incomingDeck = this.activeDeck === 'A' ? 'B' : 'A';
-    const outgoingEl = this.activeDeck === 'A' ? this.deckA : this.deckB;
-    const incomingEl = incomingDeck === 'A' ? this.deckA : this.deckB;
-    const outgoingGain = this.activeDeck === 'A' ? this.deckAGain : this.deckBGain;
-    const incomingGain = incomingDeck === 'A' ? this.deckAGain : this.deckBGain;
-
-    const now = this.ctx.currentTime;
-    incomingEl.src = track.url;
-    incomingEl.currentTime = 0;
-    incomingGain.gain.cancelScheduledValues(now);
-    outgoingGain.gain.cancelScheduledValues(now);
-    incomingGain.gain.setValueAtTime(0.001, now);
-    outgoingGain.gain.setValueAtTime(1.0, now);
-
-    incomingEl
-      .play()
-      .then(() => {
-        if (!this.ctx) return;
-        const t = this.ctx.currentTime;
-        incomingGain.gain.linearRampToValueAtTime(1.0, t + fadeSeconds);
-        outgoingGain.gain.linearRampToValueAtTime(0.001, t + fadeSeconds);
-
-        this.activeDeck = incomingDeck;
-        this.playlistIndex = nextIndex;
-        this.uploadedFileName = track.name;
-        this.notifyPlaylistChanged();
-
-        window.setTimeout(() => {
-          outgoingEl.pause();
-          this.isCrossfadingNow = false;
-        }, fadeSeconds * 1000 + 120);
-      })
-      .catch(() => {
-        this.isCrossfadingNow = false;
-      });
-  }
-
   public applyDspSettings(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
@@ -305,7 +201,10 @@ class PartyBoxAudioEngine {
     });
 
     if (this.bassBoostFilter) {
-      if (this.currentPlaytimeBoost || this.currentBassBoost === BassBoostMode.Off) {
+      if (
+        this.currentPlaytimeBoost ||
+        this.currentBassBoost === BassBoostMode.Off
+      ) {
         this.bassBoostFilter.frequency.setTargetAtTime(60, now, 0.03);
         this.bassBoostFilter.Q.setTargetAtTime(1.0, now, 0.03);
         this.bassBoostFilter.gain.setTargetAtTime(0, now, 0.03);
@@ -331,12 +230,22 @@ class PartyBoxAudioEngine {
     }
 
     if (this.compressor) {
-      this.compressor.threshold.setTargetAtTime(this.currentAiBoost ? -18 : -4, now, 0.04);
-      this.compressor.ratio.setTargetAtTime(this.currentAiBoost ? 4.5 : 1.5, now, 0.04);
+      this.compressor.threshold.setTargetAtTime(
+        this.currentAiBoost ? -18 : -4,
+        now,
+        0.04
+      );
+      this.compressor.ratio.setTargetAtTime(
+        this.currentAiBoost ? 4.5 : 1.5,
+        now,
+        0.04
+      );
     }
 
     if (this.masterGain) {
-      const effectiveGain = this.currentMuted ? 0 : Math.pow(this.currentVolume / 100, 1.65);
+      const effectiveGain = this.currentMuted
+        ? 0
+        : Math.pow(this.currentVolume / 100, 1.65);
       this.masterGain.gain.setTargetAtTime(effectiveGain, now, 0.025);
     }
   }
@@ -401,7 +310,10 @@ class PartyBoxAudioEngine {
     const maxLog = Math.log10(18000);
     const freqs = new Float32Array(numPoints);
     for (let i = 0; i < numPoints; i++) {
-      freqs[i] = Math.pow(10, minLog + (i / (numPoints - 1)) * (maxLog - minLog));
+      freqs[i] = Math.pow(
+        10,
+        minLog + (i / (numPoints - 1)) * (maxLog - minLog)
+      );
     }
 
     const results: Array<{ freq: number; db: number }> = [];
@@ -424,7 +336,9 @@ class PartyBoxAudioEngine {
           totalDb += g * weight;
         } else {
           const bandwidth = 0.72;
-          const weight = Math.exp(-(octaveDist * octaveDist) / (2 * bandwidth * bandwidth));
+          const weight = Math.exp(
+            -(octaveDist * octaveDist) / (2 * bandwidth * bandwidth)
+          );
           totalDb += g * weight;
         }
       });
@@ -448,44 +362,262 @@ class PartyBoxAudioEngine {
     return results;
   }
 
-  // --- Playback, Playlist & Crossfade ---
+  // --- Zero-Upload External Music Player Sync & Transport ---
 
   public getSourceState() {
-    const activeEl = this.activeDeck === 'A' ? this.deckA : this.deckB;
+    const ext = bluetoothBridge.getNativeExternalPlayerState();
     return {
       sourceMode: this.sourceMode,
-      isPlaying: this.isPlaying,
+      isPlaying: this.isPlaying || Boolean(ext?.isMusicActive),
       currentGroove: this.currentGroove,
-      uploadedFileName: this.uploadedFileName,
-      playlist: this.playlist,
-      playlistIndex: this.playlistIndex,
-      crossfadeEnabled: this.crossfadeEnabled,
-      currentTime: activeEl?.currentTime || 0,
-      duration: Number.isFinite(activeEl?.duration) ? activeEl!.duration : 0,
+      detectedBpm: this.detectedBpm,
+      externalMusicActive: Boolean(ext?.isMusicActive),
+      activeRouteName: ext?.activeRouteName || '',
     };
   }
 
-  public setCrossfadeEnabled(enabled: boolean): void {
-    this.crossfadeEnabled = enabled;
-    this.notifyPlaylistChanged();
+  /**
+   * Starts automatic Live Sync with songs playing in the user's external music player
+   * (Spotify, YouTube Music, Apple Music, Samsung Music, etc.) — NO SONG UPLOAD NEEDED!
+   * On Android APK: uses Master Mix Visualizer(0) + DSP Session 0 automatically; falls back to live room audio pickup if needed.
+   * On Browser: activates raw music frequency listener (no echo-cancellation distortion) to sync beats & lights in real time.
+   */
+  public async startLivePlayerSync(): Promise<{
+    ok: boolean;
+    mode: AudioSyncSourceMode;
+    message: string;
+  }> {
+    this.stopGrooveTimer();
+
+    // 1. Native Android APK: Master Output Mix Visualizer(0) works directly with Spotify / YouTube / any player!
+    if (bluetoothBridge.isAndroidNativeBridgeAvailable()) {
+      const extState = bluetoothBridge.getNativeExternalPlayerState();
+      if (extState?.visualizerAvailable) {
+        this.stopSyncStream();
+        this.sourceMode = 'player_sync';
+        this.isPlaying = true;
+        bluetoothBridge.syncHardwareEq(this.currentGains, this.currentBassBoost);
+        faultLogger.record({
+          severity: 'success',
+          category: 'audio_sync',
+          title: 'סינכרון ישיר לנגן המוזיקה באנדרואיד הופעל',
+          details:
+            'מנתח בזמן אמת את ערוץ השמע הראשי של המכשיר (Session 0) מכל נגן (Spotify, YouTube Music וכדומה) ללא צורך בהעלאת שירים.',
+        });
+        this.notifyStateChanged();
+        return {
+          ok: true,
+          mode: 'player_sync',
+          message:
+            'סינכרון ישיר פעיל! כל שיר שתפעיל בנגן המוזיקה במכשיר מסונכרן אוטומטית לתאורה ולאיקוולייזר.',
+        };
+      }
+    }
+
+    // 2. Web / Acoustic Live Music Listener (high-fidelity un-filtered music pickup)
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      faultLogger.record({
+        severity: 'error',
+        category: 'audio_sync',
+        title: 'ממשק לכידת שמע אינו נתמך בדפדפן זה',
+        details: 'navigator.mediaDevices אינו זמין.',
+        suggestionHe: 'פתח את האפליקציה ב-Chrome או באפליקציית ה-APK באנדרואיד.',
+      });
+      return {
+        ok: false,
+        mode: this.sourceMode,
+        message: 'הדפדפן אינו תומך בלכידת שמע חיה — מומלץ להשתמש ב-Chrome או ב-APK.',
+      };
+    }
+
+    try {
+      const ctx = this.ensureContext();
+      this.stopSyncStream();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+
+      this.attachSyncStream(ctx, stream, 'player_sync');
+      faultLogger.record({
+        severity: 'success',
+        category: 'audio_sync',
+        title: 'סינכרון חי עם השירים המתנגנים הופעל',
+        details:
+          'קולט ומנתח בזמן אמת את קצב הבס, התדרים וה-BPM מהשירים המתנגנים בנגן שלך ללא שום העלאת קבצים.',
+      });
+      return {
+        ok: true,
+        mode: 'player_sync',
+        message:
+          'מסונכרן בזמן אמת עם השירים המתנגנים בנגן שלך! התאורה והספקטרום מגיבים אוטומטית לקצב.',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'גישת שמע נדחתה';
+      faultLogger.record({
+        severity: 'warning',
+        category: 'audio_sync',
+        title: 'נדרש אישור גישת שמע לסינכרון עם הנגן בדפדפן',
+        details: msg,
+        suggestionHe:
+          'אשר הרשאת מיקרופון בסרגל הכתובת או לחץ על ״סינכרון שמע מערכת/כרטיסייה״ כדי ללכוד שמע ישירות מהמחשב.',
+      });
+      return {
+        ok: false,
+        mode: this.sourceMode,
+        message:
+          'כדי לסנכרן אוטומטית עם הנגן בדפדפן, אשר גישת שמע או לחץ על ״שמע מערכת / כרטיסייה״.',
+      };
+    }
+  }
+
+  /**
+   * Direct digital system/tab audio capture on Desktop/Web browsers (Spotify Web, YouTube, Windows/Mac system audio)
+   * using getDisplayMedia({ audio: true }) — 100% pure digital signal without room noise and zero file uploads!
+   */
+  public async startSystemAudioSync(): Promise<{
+    ok: boolean;
+    message: string;
+  }> {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getDisplayMedia
+    ) {
+      return this.startLivePlayerSync();
+    }
+
+    try {
+      const ctx = this.ensureContext();
+      this.stopGrooveTimer();
+      this.stopSyncStream();
+
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        } as MediaTrackConstraints,
+      });
+
+      const audioTracks = stream.getAudioTracks();
+      // Stop the video track immediately if audio is present — we only need pure audio sync!
+      stream.getVideoTracks().forEach((vt) => vt.stop());
+
+      if (audioTracks.length === 0) {
+        faultLogger.record({
+          severity: 'warning',
+          category: 'audio_sync',
+          title: 'שיתוף שמע מערכת בוצע ללא סימון תיבת השמע',
+          details: 'לא התקבל ערוץ שמע מהכרטיסייה או מהמערכת.',
+          suggestionHe:
+            'בחלון השיתוף שנפתח, סמן את התיבה ״שתף גם שמע כרטיסייה / שמע מערכת״ (Share audio).',
+        });
+        return {
+          ok: false,
+          message:
+            'לא סומנה תיבת ״שתף שמע״ (Share audio) בחלון שנפתח — סמן אותה לסינכרון דיגיטלי מלא עם הנגן.',
+        };
+      }
+
+      const audioOnlyStream = new MediaStream(audioTracks);
+      audioTracks[0].addEventListener('ended', () => {
+        if (this.sourceMode === 'system_audio') {
+          this.isPlaying = false;
+          this.notifyStateChanged();
+        }
+      });
+
+      this.attachSyncStream(ctx, audioOnlyStream, 'system_audio');
+      faultLogger.record({
+        severity: 'success',
+        category: 'audio_sync',
+        title: 'סינכרון שמע דיגיטלי ישיר מהמערכת/נגן פעיל',
+        details: `מחובר לערוץ השמע: ${audioTracks[0].label || 'System/Tab Audio'}`,
+      });
+
+      return {
+        ok: true,
+        message:
+          'סינכרון שמע דיגיטלי ישיר פעיל! כל שיר ב-YouTube / Spotify מסונכרן ישירות לתאורה ולספקטרום.',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.toLowerCase().includes('cancel') || msg.toLowerCase().includes('denied')) {
+        return {
+          ok: false,
+          message: 'בחירת מקור שמע המערכת בוטלה.',
+        };
+      }
+      faultLogger.record({
+        severity: 'warning',
+        category: 'audio_sync',
+        title: 'שיתוף שמע מערכת אינו זמין במסגרת זו — עובר לסינכרון חי אוטומטי',
+        details: msg || 'getDisplayMedia restricted',
+      });
+      return this.startLivePlayerSync();
+    }
+  }
+
+  private attachSyncStream(
+    ctx: AudioContext,
+    stream: MediaStream,
+    mode: 'player_sync' | 'system_audio'
+  ): void {
+    this.syncStream = stream;
+    this.syncSource = ctx.createMediaStreamSource(stream);
+    this.syncAnalyser = ctx.createAnalyser();
+    this.syncAnalyser.fftSize = 256;
+    this.syncAnalyser.smoothingTimeConstant = 0.72;
+    this.syncFreqData = new Uint8Array(this.syncAnalyser.frequencyBinCount);
+    this.syncSource.connect(this.syncAnalyser);
+
+    this.sourceMode = mode;
+    this.isPlaying = true;
+    this.notifyStateChanged();
+  }
+
+  private stopSyncStream(): void {
+    if (this.syncSource) {
+      try {
+        this.syncSource.disconnect();
+      } catch {
+        // ignore
+      }
+      this.syncSource = null;
+    }
+    if (this.syncStream) {
+      this.syncStream.getTracks().forEach((t) => t.stop());
+      this.syncStream = null;
+    }
+    this.syncAnalyser = null;
+    this.syncFreqData = null;
+  }
+
+  private stopGrooveTimer(): void {
+    if (this.grooveTimer !== null) {
+      window.clearInterval(this.grooveTimer);
+      this.grooveTimer = null;
+    }
   }
 
   public startGroove(grooveId?: DemoGrooveId): void {
     const ctx = this.ensureContext();
-    this.stopMicCapture();
-    this.deckA?.pause();
-    this.deckB?.pause();
-    this.isCrossfadingNow = false;
+    this.stopSyncStream();
+    this.stopGrooveTimer();
 
     if (grooveId) {
       this.currentGroove = grooveId;
     }
     this.sourceMode = 'groove';
     this.isPlaying = true;
-
-    if (this.grooveTimer !== null) {
-      window.clearInterval(this.grooveTimer);
-    }
 
     const bpmMap: Record<DemoGrooveId, number> = {
       house_124: 124,
@@ -494,6 +626,7 @@ class PartyBoxAudioEngine {
       bass_sweep: 100,
     };
     const bpm = bpmMap[this.currentGroove];
+    this.detectedBpm = bpm;
     const sixteenthMs = (60 / bpm / 4) * 1000;
 
     this.stepIndex = 0;
@@ -503,167 +636,51 @@ class PartyBoxAudioEngine {
       this.stepIndex = (this.stepIndex + 1) % 16;
       this.triggerGrooveStep(this.ctx, this.stepIndex);
     }, sixteenthMs);
+
+    this.notifyStateChanged();
   }
 
   public togglePlay(): boolean {
+    // On Android APK when in player_sync mode: toggle the user's real external music player!
+    if (
+      this.sourceMode === 'player_sync' &&
+      bluetoothBridge.isAndroidNativeBridgeAvailable()
+    ) {
+      bluetoothBridge.dispatchExternalPlayerMediaKey('play_pause');
+      const next = !this.isPlaying;
+      this.isPlaying = next;
+      this.notifyStateChanged();
+      return next;
+    }
+
     if (this.isPlaying) {
       this.pause();
       return false;
     }
-    if (this.sourceMode === 'file' && this.playlist.length > 0) {
-      this.ensureDecks();
-      const el = this.activeDeck === 'A' ? this.deckA : this.deckB;
-      if (el) {
-        el.play().catch(() => {});
-        this.isPlaying = true;
-        return true;
-      }
+
+    if (this.sourceMode === 'groove') {
+      this.startGroove(this.currentGroove);
+      return true;
     }
-    this.startGroove(this.currentGroove);
+
+    void this.startLivePlayerSync();
     return true;
   }
 
   public pause(): void {
     this.isPlaying = false;
-    if (this.grooveTimer !== null) {
-      window.clearInterval(this.grooveTimer);
-      this.grooveTimer = null;
-    }
-    this.deckA?.pause();
-    this.deckB?.pause();
-    if (this.sourceMode === 'mic') {
-      this.stopMicCapture();
-      this.sourceMode = 'groove';
-    }
-    this.notifyPlaylistChanged();
-  }
-
-  public async loadAudioFiles(files: File[]): Promise<string> {
-    if (files.length === 0) return '';
-    this.ensureDecks();
-    this.pause();
-    this.stopMicCapture();
-
-    const addedTracks: PlaylistTrack[] = files.map((f, i) => ({
-      id: `trk_${Date.now()}_${i}`,
-      name: f.name,
-      url: URL.createObjectURL(f),
-    }));
-
-    const startIndex = this.playlist.length;
-    this.playlist = [...this.playlist, ...addedTracks];
-    await this.playPlaylistTrack(startIndex);
-    return addedTracks[0].name;
-  }
-
-  public async loadAudioFile(file: File): Promise<string> {
-    return this.loadAudioFiles([file]);
-  }
-
-  public async playPlaylistTrack(index: number): Promise<void> {
-    if (index < 0 || index >= this.playlist.length) return;
-    const ctx = this.ensureContext();
-    this.ensureDecks();
-    if (this.grooveTimer !== null) {
-      window.clearInterval(this.grooveTimer);
-      this.grooveTimer = null;
-    }
-    this.stopMicCapture();
-    this.isCrossfadingNow = false;
-
-    const track = this.playlist[index];
-    this.playlistIndex = index;
-    this.uploadedFileName = track.name;
-    this.sourceMode = 'file';
-
-    const el = this.activeDeck === 'A' ? this.deckA! : this.deckB!;
-    const otherEl = this.activeDeck === 'A' ? this.deckB! : this.deckA!;
-    const activeGain = this.activeDeck === 'A' ? this.deckAGain! : this.deckBGain!;
-    const otherGain = this.activeDeck === 'A' ? this.deckBGain! : this.deckAGain!;
-
-    otherEl.pause();
-    activeGain.gain.cancelScheduledValues(ctx.currentTime);
-    otherGain.gain.cancelScheduledValues(ctx.currentTime);
-    activeGain.gain.setValueAtTime(1.0, ctx.currentTime);
-    otherGain.gain.setValueAtTime(0.0, ctx.currentTime);
-
-    el.src = track.url;
-    el.currentTime = 0;
-    await el.play();
-    this.isPlaying = true;
-    this.notifyPlaylistChanged();
+    this.detectedBpm = 0;
+    this.stopGrooveTimer();
+    this.stopSyncStream();
+    this.notifyStateChanged();
   }
 
   public nextTrack(): void {
-    if (this.playlist.length === 0) return;
-    const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
-    if (this.crossfadeEnabled && this.isPlaying && this.playlist.length > 1) {
-      this.crossfadeToTrack(nextIdx, 1.8);
-    } else {
-      this.playPlaylistTrack(nextIdx).catch(() => {});
-    }
+    bluetoothBridge.dispatchExternalPlayerMediaKey('next');
   }
 
   public prevTrack(): void {
-    if (this.playlist.length === 0) return;
-    const prevIdx =
-      (this.playlistIndex - 1 + this.playlist.length) % this.playlist.length;
-    this.playPlaylistTrack(prevIdx).catch(() => {});
-  }
-
-  public clearPlaylist(): void {
-    this.deckA?.pause();
-    this.deckB?.pause();
-    this.playlist.forEach((t) => URL.revokeObjectURL(t.url));
-    this.playlist = [];
-    this.playlistIndex = 0;
-    this.uploadedFileName = null;
-    if (this.sourceMode === 'file') {
-      this.sourceMode = 'groove';
-      this.isPlaying = false;
-    }
-    this.notifyPlaylistChanged();
-  }
-
-  // --- Ambient Room Beat-Sync Mic ---
-
-  public async startMicBeatSync(): Promise<boolean> {
-    try {
-      const ctx = this.ensureContext();
-      this.pause();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-      });
-      this.micStream = stream;
-      this.micSource = ctx.createMediaStreamSource(stream);
-      if (this.analyser) {
-        this.micSource.connect(this.analyser);
-      }
-      this.sourceMode = 'mic';
-      this.isPlaying = true;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private stopMicCapture(): void {
-    if (this.micSource) {
-      try {
-        this.micSource.disconnect();
-      } catch {
-        // ignore
-      }
-      this.micSource = null;
-    }
-    if (this.micStream) {
-      this.micStream.getTracks().forEach((t) => t.stop());
-      this.micStream = null;
-    }
+    bluetoothBridge.dispatchExternalPlayerMediaKey('previous');
   }
 
   // --- Live Karaoke Microphone Engine + Real Voice Auto-Ducking ---
@@ -725,7 +742,6 @@ class PartyBoxAudioEngine {
       this.karaokeAnalyser.fftSize = 256;
       this.karaokeTimeData = new Uint8Array(this.karaokeAnalyser.fftSize);
 
-      // Connect vocal chain: mic -> hp -> bass -> treble -> analyser + dry + echo loop -> masterGain
       this.karaokeSource.connect(this.karaokeHpFilter);
       this.karaokeHpFilter.connect(this.karaokeBassFilter);
       this.karaokeBassFilter.connect(this.karaokeTrebleFilter);
@@ -744,7 +760,14 @@ class PartyBoxAudioEngine {
       this.karaokeActive = true;
       this.updateLiveKaraokeParams(params);
       return true;
-    } catch {
+    } catch (err) {
+      faultLogger.record({
+        severity: 'warning',
+        category: 'permissions',
+        title: 'גישה למיקרופון קריוקי חי נדחתה',
+        details: err instanceof Error ? err.message : 'Microphone unavailable',
+        suggestionHe: 'אשר הרשאת מיקרופון בחלון החיבור העליון.',
+      });
       this.stopLiveKaraoke();
       return false;
     }
@@ -768,7 +791,11 @@ class PartyBoxAudioEngine {
 
     const echoNorm = params.echoPercent / 100;
     this.karaokeFeedback?.gain.setTargetAtTime(echoNorm * 0.52, now, 0.04);
-    this.karaokeWetGain?.gain.setTargetAtTime(micGain * echoNorm * 0.65, now, 0.04);
+    this.karaokeWetGain?.gain.setTargetAtTime(
+      micGain * echoNorm * 0.65,
+      now,
+      0.04
+    );
   }
 
   public stopLiveKaraoke(): void {
@@ -822,7 +849,6 @@ class PartyBoxAudioEngine {
       usedLiveMic = false;
     }
 
-    // Play a pleasant 4.4s logarithmic reference sweep + warm pink pulse through the speaker
     const now = ctx.currentTime;
     const sweepOsc = ctx.createOscillator();
     const sweepGain = ctx.createGain();
@@ -903,7 +929,9 @@ class PartyBoxAudioEngine {
 
       const lowRatio = (avgs[0] + avgs[1]) / (2 * Math.max(1, overallMean));
       detectedEnvironment =
-        lowRatio < 0.88 ? AcousticEnvironment.Outdoor : AcousticEnvironment.Indoor;
+        lowRatio < 0.88
+          ? AcousticEnvironment.Outdoor
+          : AcousticEnvironment.Indoor;
     } else {
       detectedEnvironment = this.currentEnvironment;
       calibratedGains =
@@ -913,6 +941,12 @@ class PartyBoxAudioEngine {
     }
 
     onProgress(100, 'הכיול האקוסטי הושלם והוחל על הרמקול!');
+    faultLogger.record({
+      severity: 'success',
+      category: 'audio_sync',
+      title: 'כיול אקוסטי חכם הושלם',
+      details: `סביבה מזוהה: ${detectedEnvironment === AcousticEnvironment.Outdoor ? 'שטח פתוח' : 'חלל פנים'} · מיקרופון חי: ${usedLiveMic ? 'כן' : 'פרופיל מותאם'}`,
+    });
 
     return {
       calibratedGains,
@@ -1013,7 +1047,7 @@ class PartyBoxAudioEngine {
     }
   }
 
-  // --- Synthesized Musical Groove Engine ---
+  // --- Synthesized Studio Test Groove Engine (Optional test signal) ---
 
   private triggerGrooveStep(ctx: AudioContext, step: number): void {
     const now = ctx.currentTime;
@@ -1028,7 +1062,10 @@ class PartyBoxAudioEngine {
         const gain = ctx.createGain();
         osc.type = 'sine';
         osc.frequency.setValueAtTime(step === 0 ? 42 : 68, now);
-        osc.frequency.exponentialRampToValueAtTime(step === 0 ? 85 : 44, now + 0.75);
+        osc.frequency.exponentialRampToValueAtTime(
+          step === 0 ? 85 : 44,
+          now + 0.75
+        );
         gain.gain.setValueAtTime(0.45, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
         osc.connect(gain);
@@ -1058,7 +1095,13 @@ class PartyBoxAudioEngine {
         this.synthPluck(ctx, dest, now, note * 2, 0.16);
       }
       if (step === 0 || step === 6 || step === 12) {
-        this.synthBassNote(ctx, dest, now, step === 6 ? 116.54 / 2 : 55, 0.24);
+        this.synthBassNote(
+          ctx,
+          dest,
+          now,
+          step === 6 ? 116.54 / 2 : 55,
+          0.24
+        );
       }
       return;
     }
@@ -1171,7 +1214,12 @@ class PartyBoxAudioEngine {
     osc.stop(time + duration + 0.02);
   }
 
-  private synthHat(ctx: AudioContext, dest: AudioNode, time: number, level: number): void {
+  private synthHat(
+    ctx: AudioContext,
+    dest: AudioNode,
+    time: number,
+    level: number
+  ): void {
     const bufferSize = Math.floor(ctx.sampleRate * 0.06);
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -1196,12 +1244,18 @@ class PartyBoxAudioEngine {
     noise.start(time);
   }
 
-  private synthClap(ctx: AudioContext, dest: AudioNode, time: number, level: number): void {
+  private synthClap(
+    ctx: AudioContext,
+    dest: AudioNode,
+    time: number,
+    level: number
+  ): void {
     const bufferSize = Math.floor(ctx.sampleRate * 0.14);
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.035));
+      data[i] =
+        (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.035));
     }
 
     const noise = ctx.createBufferSource();
@@ -1386,13 +1440,41 @@ class PartyBoxAudioEngine {
     }
   }
 
-  // --- Real-Time Analysis Frame & Live Voice Ducking ---
+  private recordBeatAndEstimateBpm(nowMs: number, energy: number): void {
+    if (this.lastBeatTime > 0) {
+      const interval = nowMs - this.lastBeatTime;
+      if (interval >= 290 && interval <= 920) {
+        this.beatIntervalsMs.push(interval);
+        if (this.beatIntervalsMs.length > 8) {
+          this.beatIntervalsMs.shift();
+        }
+        if (this.beatIntervalsMs.length >= 3) {
+          const avgMs =
+            this.beatIntervalsMs.reduce((a, b) => a + b, 0) /
+            this.beatIntervalsMs.length;
+          this.detectedBpm = Math.round(60000 / avgMs);
+        }
+      } else if (interval > 2200) {
+        this.beatIntervalsMs = [];
+        this.detectedBpm = 0;
+      }
+    }
+    this.lastBeatTime = nowMs;
+    this.beatListeners.forEach((cb) => cb(energy));
+  }
+
+  // --- Real-Time Analysis Frame (Native External Player Visualizer + Web Stream + Studio DSP) ---
 
   public getAnalysisFrame(): AudioAnalysisFrame {
     this.djFlareValue = Math.max(0, this.djFlareValue * 0.9);
 
     // Measure live karaoke vocal level & drive automatic MC Ducking
-    if (this.karaokeActive && this.karaokeAnalyser && this.karaokeTimeData && this.ctx) {
+    if (
+      this.karaokeActive &&
+      this.karaokeAnalyser &&
+      this.karaokeTimeData &&
+      this.ctx
+    ) {
       this.karaokeAnalyser.getByteTimeDomainData(this.karaokeTimeData);
       let sumSq = 0;
       for (let i = 0; i < this.karaokeTimeData.length; i++) {
@@ -1417,54 +1499,125 @@ class PartyBoxAudioEngine {
       }
     }
 
+    // 1. Check Native Android Master Mix Visualizer (Session 0 — Spotify / YouTube / System Music Player!)
     if (
-      !this.analyser ||
-      !this.freqData ||
+      this.sourceMode === 'player_sync' &&
+      bluetoothBridge.isAndroidNativeBridgeAvailable()
+    ) {
+      const nativeBins = bluetoothBridge.getNativeSystemAudioBins();
+      const extState = bluetoothBridge.getNativeExternalPlayerState();
+      const musicActive = Boolean(extState?.isMusicActive);
+
+      if (nativeBins && nativeBins.length >= 28 && musicActive) {
+        let bassSum = 0;
+        for (let i = 0; i < 6; i++) bassSum += nativeBins[i];
+        const subBassEnergy = Math.min(1, bassSum / 5.2);
+
+        let midSum = 0;
+        for (let i = 6; i < 18; i++) midSum += nativeBins[i];
+        const midEnergy = Math.min(1, midSum / 11);
+
+        let highSum = 0;
+        for (let i = 18; i < 28; i++) highSum += nativeBins[i];
+        const highEnergy = Math.min(1, highSum / 9.5);
+
+        for (let b = 0; b < 28; b++) {
+          this.reusableSpectrum[b] = Math.max(0.03, nativeBins[b]);
+        }
+
+        const nowMs = performance.now();
+        const delta = subBassEnergy - this.prevBassAvg;
+        const isBeat =
+          (delta > 0.1 && subBassEnergy > 0.36 && nowMs - this.lastBeatTime > 210) ||
+          this.djFlareValue > 0.75;
+        if (isBeat && nowMs - this.lastBeatTime > 210) {
+          this.recordBeatAndEstimateBpm(nowMs, subBassEnergy);
+        }
+        this.prevBassAvg = this.prevBassAvg * 0.8 + subBassEnergy * 0.2;
+
+        return {
+          spectrum: this.reusableSpectrum,
+          subBassEnergy: Math.max(subBassEnergy, this.djFlareValue * 0.75),
+          midEnergy: Math.max(midEnergy, this.currentVoiceRms * 0.65),
+          highEnergy,
+          isBeat,
+          detectedBpm: this.detectedBpm,
+          djFlare: this.djFlareValue,
+          karaokeVoiceLevel: this.currentVoiceRms,
+          externalMusicActive: true,
+        };
+      }
+    }
+
+    // 2. Choose active Web Audio analyser (External Player Stream vs Internal DSP Groove/FX)
+    const activeAnalyser =
+      (this.sourceMode === 'player_sync' || this.sourceMode === 'system_audio') &&
+      this.syncAnalyser &&
+      this.syncFreqData &&
+      this.djFlareValue < 0.05
+        ? this.syncAnalyser
+        : this.analyser;
+
+    const activeData =
+      activeAnalyser === this.syncAnalyser ? this.syncFreqData : this.freqData;
+
+    if (
+      !activeAnalyser ||
+      !activeData ||
       (!this.isPlaying && !this.karaokeActive && this.djFlareValue < 0.02)
     ) {
+      for (let i = 0; i < 28; i++) {
+        this.reusableSpectrum[i] = 0.03;
+      }
       return {
-        spectrum: new Array(28).fill(0.03),
+        spectrum: this.reusableSpectrum,
         subBassEnergy: this.djFlareValue * 0.8,
         midEnergy: this.djFlareValue * 0.5,
         highEnergy: this.djFlareValue * 0.6,
         isBeat: this.djFlareValue > 0.7,
+        detectedBpm: 0,
         djFlare: this.djFlareValue,
         karaokeVoiceLevel: this.currentVoiceRms,
+        externalMusicActive: false,
       };
     }
 
-    this.analyser.getByteFrequencyData(this.freqData);
-    const binCount = this.freqData.length;
+    activeAnalyser.getByteFrequencyData(activeData);
+    const binCount = activeData.length;
 
     let bassSum = 0;
     for (let i = 1; i <= 7; i++) {
-      bassSum += this.freqData[i];
+      bassSum += activeData[i];
     }
-    const subBassEnergy = Math.min(1, bassSum / (7 * 235));
+    const subBassEnergy = Math.min(1, bassSum / (7 * 220));
 
     let midSum = 0;
     for (let i = 8; i <= 36; i++) {
-      midSum += this.freqData[i];
+      midSum += activeData[i];
     }
-    const midEnergy = Math.min(1, midSum / (29 * 210));
+    const midEnergy = Math.min(1, midSum / (29 * 200));
 
     let highSum = 0;
     for (let i = 37; i <= 95; i++) {
-      highSum += this.freqData[i];
+      highSum += activeData[i];
     }
-    const highEnergy = Math.min(1, highSum / (59 * 180));
+    const highEnergy = Math.min(1, highSum / (59 * 175));
 
     const nowMs = performance.now();
     const delta = subBassEnergy - this.prevBassAvg;
     const isBeat =
-      (delta > 0.11 && subBassEnergy > 0.42 && nowMs - this.lastBeatTime > 210) ||
+      (delta > 0.095 && subBassEnergy > 0.34 && nowMs - this.lastBeatTime > 210) ||
       this.djFlareValue > 0.75;
     if (isBeat && nowMs - this.lastBeatTime > 210) {
-      this.lastBeatTime = nowMs;
+      if (this.sourceMode !== 'groove') {
+        this.recordBeatAndEstimateBpm(nowMs, subBassEnergy);
+      } else {
+        this.lastBeatTime = nowMs;
+        this.beatListeners.forEach((cb) => cb(subBassEnergy));
+      }
     }
     this.prevBassAvg = this.prevBassAvg * 0.82 + subBassEnergy * 0.18;
 
-    const bars: number[] = [];
     for (let b = 0; b < 28; b++) {
       const t0 = Math.pow(b / 28, 1.75);
       const t1 = Math.pow((b + 1) / 28, 1.75);
@@ -1472,20 +1625,25 @@ class PartyBoxAudioEngine {
       const endBin = Math.max(startBin + 1, Math.floor(t1 * (binCount * 0.82)));
       let sum = 0;
       for (let k = startBin; k < endBin && k < binCount; k++) {
-        sum += this.freqData[k];
+        sum += activeData[k];
       }
       const avg = sum / Math.max(1, endBin - startBin) / 255;
-      bars.push(Math.max(0.04, Math.min(1, avg)));
+      this.reusableSpectrum[b] = Math.max(0.03, Math.min(1, avg));
     }
 
+    const signalActive = subBassEnergy > 0.06 || midEnergy > 0.06;
+
     return {
-      spectrum: bars,
+      spectrum: this.reusableSpectrum,
       subBassEnergy: Math.max(subBassEnergy, this.djFlareValue * 0.75),
       midEnergy: Math.max(midEnergy, this.currentVoiceRms * 0.65),
       highEnergy,
       isBeat,
+      detectedBpm: signalActive || this.sourceMode === 'groove' ? this.detectedBpm : 0,
       djFlare: this.djFlareValue,
       karaokeVoiceLevel: this.currentVoiceRms,
+      externalMusicActive:
+        this.sourceMode !== 'groove' && this.isPlaying && signalActive,
     };
   }
 }

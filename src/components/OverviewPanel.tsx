@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import {
   BatteryCharging,
   BellRing,
+  BookOpen,
   ChevronLeft,
+  ClipboardList,
   Clock,
   Disc3,
   Download,
@@ -637,6 +639,47 @@ export const OverviewPanel: React.FC<OverviewPanelProps> = ({
             ))}
           </div>
         </section>
+      </div>
+
+      {/* Section 5: User Guide & Real-Time Fault Log Quick Access */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onNavigate(NavTab.UserGuide)}
+          className="neon-surface flex items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 text-right transition-colors hover:border-[#D95B2B]/60 dark:border-slate-700/70 dark:bg-[#1E2738] cursor-pointer"
+        >
+          <div className="flex items-start gap-3.5">
+            <BookOpen className="mt-0.5 h-5 w-5 shrink-0 text-[#D95B2B]" />
+            <div>
+              <div className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                מדריך למשתמש מפורט וצבעוני
+              </div>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                הסבר שלב-אחר-שלב לחיבור תאורת הרמקול, סינכרון אוטומטי עם הנגן ללא העלאת שירים וכיול סאונד
+              </p>
+            </div>
+          </div>
+          <ChevronLeft className="h-4 w-4 shrink-0 text-[#D95B2B]" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate(NavTab.FaultLog)}
+          className="neon-surface flex items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 text-right transition-colors hover:border-[#D95B2B]/60 dark:border-slate-700/70 dark:bg-[#1E2738] cursor-pointer"
+        >
+          <div className="flex items-start gap-3.5">
+            <ClipboardList className="mt-0.5 h-5 w-5 shrink-0 text-teal-600 dark:text-teal-400" />
+            <div>
+              <div className="font-display text-sm font-bold text-slate-900 dark:text-white">
+                יומן תקלות ואבחון רמקול בזמן אמת
+              </div>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                ניטור פקודות תאורה (BLE / SPP), בדיקה עצמית בלחיצה אחת, הרשאות אנדרואיד וייצוא דוח מלא
+              </p>
+            </div>
+          </div>
+          <ChevronLeft className="h-4 w-4 shrink-0 text-[#D95B2B]" />
+        </button>
       </div>
     </div>
   );

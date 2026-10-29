@@ -1,12 +1,30 @@
-import React from 'react';
-import { ArrowLeftRight, Power, RotateCcw, Sparkles, Sun, Zap } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Activity,
+  ArrowLeftRight,
+  Bluetooth,
+  CheckCircle2,
+  ClipboardList,
+  Power,
+  Radio,
+  RotateCcw,
+  Send,
+  Sparkles,
+  Sun,
+  Zap,
+} from 'lucide-react';
 import {
   COLOR_SWATCH_PAIRS,
   LIGHTSHOW_PRESETS,
   LightZoneKey,
+  LightingProtocolMode,
   LightshowPresetId,
   LightshowState,
 } from '../types/speaker';
+import {
+  LightingChannelDiagnostics,
+  bluetoothBridge,
+} from '../services/bluetoothBridge';
 
 interface LightshowPanelProps {
   lightshow: LightshowState;
@@ -15,6 +33,8 @@ interface LightshowPanelProps {
   onToggleZone: (zone: LightZoneKey) => void;
   onSetAllZones: (active: boolean) => void;
   onResetLightshow: () => void;
+  onOpenBluetoothModal: () => void;
+  onOpenFaultLog: () => void;
 }
 
 const ZONE_ITEMS: Array<{
@@ -49,6 +69,12 @@ const ZONE_ITEMS: Array<{
   },
 ];
 
+const PROTOCOL_MODES: Array<{ id: LightingProtocolMode; label: string }> = [
+  { id: 'auto_dual', label: 'אוטומטי כפול (מומלץ)' },
+  { id: 'harman_aa', label: 'Harman SmartAudio' },
+  { id: 'gatt_raw', label: 'GATT ישיר' },
+];
+
 export const LightshowPanel: React.FC<LightshowPanelProps> = ({
   lightshow,
   onUpdateLightshow,
@@ -56,7 +82,29 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
   onToggleZone,
   onSetAllZones,
   onResetLightshow,
+  onOpenBluetoothModal,
+  onOpenFaultLog,
 }) => {
+  const [diag, setDiag] = useState<LightingChannelDiagnostics>(() =>
+    bluetoothBridge.getLightingDiagnostics()
+  );
+  const [protocolMode, setProtocolMode] = useState<LightingProtocolMode>(() =>
+    bluetoothBridge.getLightingProtocolMode()
+  );
+  const [testFeedback, setTestFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [sendingTest, setSendingTest] = useState(false);
+
+  useEffect(() => {
+    setDiag(bluetoothBridge.getLightingDiagnostics());
+    return bluetoothBridge.onDiagnosticsChanged(() => {
+      setDiag(bluetoothBridge.getLightingDiagnostics());
+      setProtocolMode(bluetoothBridge.getLightingProtocolMode());
+    });
+  }, []);
+
   const presetEntries = Object.entries(LIGHTSHOW_PRESETS) as Array<
     [LightshowPresetId, (typeof LIGHTSHOW_PRESETS)[LightshowPresetId]]
   >;
@@ -68,11 +116,156 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
     });
   };
 
+  const handleProtocolChange = (mode: LightingProtocolMode) => {
+    bluetoothBridge.setLightingProtocolMode(mode);
+    setProtocolMode(mode);
+    bluetoothBridge.syncHardwareLightshow(lightshow, true);
+  };
+
+  const handleSendHardwareTest = async () => {
+    setSendingTest(true);
+    setTestFeedback(null);
+    const res = await bluetoothBridge.sendTestLightingFlash(lightshow);
+    setTestFeedback({ ok: res.ok, text: res.message });
+    setSendingTest(false);
+  };
+
   const isNeonActive =
     lightshow.enabled && lightshow.preset === LightshowPresetId.Neon;
 
+  const transportLabel =
+    diag.transport === 'android_dual'
+      ? 'אנדרואיד כפול (BLE GATT + SPP)'
+      : diag.transport === 'android_ble_gatt'
+        ? 'אנדרואיד BLE GATT'
+        : diag.transport === 'android_spp'
+          ? 'אנדרואיד RFCOMM SPP'
+          : diag.transport === 'web_ble_gatt'
+            ? 'דפדפן Web Bluetooth GATT'
+            : 'ממתין לחיבור ערוץ תאורה ברמקול';
+
   return (
     <div className="space-y-6">
+      {/* Section 0: Hardware Speaker Lighting Channel Status & Live Test */}
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-5 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
+              <Radio
+                className={`h-4 w-4 ${
+                  diag.connected ? 'text-teal-500' : 'text-[#D95B2B]'
+                }`}
+              />
+              <span>שידור תאורה חי לרמקול הנייד:</span>
+              <span
+                className={
+                  diag.connected
+                    ? 'font-bold text-teal-600 dark:text-teal-400'
+                    : 'font-bold text-amber-600 dark:text-amber-400'
+                }
+              >
+                {transportLabel}
+              </span>
+            </div>
+            <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              {diag.connected ? (
+                <>
+                  ערוץ בקרה פעיל · נשלחו{' '}
+                  <strong className="font-mono text-slate-800 dark:text-slate-200 tabular-nums">
+                    {diag.packetsSent}
+                  </strong>{' '}
+                  פקודות תאורה לרמקול
+                  {diag.activeCharacteristicUuid
+                    ? ` (${diag.activeCharacteristicUuid.slice(0, 8)})`
+                    : ''}
+                  . כל שינוי צבע, ניאון, אזור וקצב משודר מיידית.
+                </>
+              ) : (
+                <>
+                  כדי שהתאורה ברמקול הנייד תגיב בפועל לכל לחיצה, חבר את{' '}
+                  <strong className="text-slate-800 dark:text-slate-200">
+                    JBL PartyBox Stage 320
+                  </strong>{' '}
+                  בחלון ה-Bluetooth. באפליקציית ה-APK נפתחים אוטומטית גם ערוץ{' '}
+                  <strong>BLE GATT</strong> וגם ערוץ <strong>SPP</strong>.
+                </>
+              )}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {!diag.connected && (
+              <button
+                type="button"
+                onClick={onOpenBluetoothModal}
+                className="flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#D95B2B] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#C24E22] whitespace-nowrap cursor-pointer"
+              >
+                <Bluetooth className="h-3.5 w-3.5" />
+                <span>חבר ערוץ תאורה ברמקול</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={sendingTest}
+              onClick={handleSendHardwareTest}
+              className="flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+            >
+              <Send className="h-3.5 w-3.5 text-[#D95B2B]" />
+              <span>
+                {sendingTest ? 'משדר לרמקול...' : 'שלח בדיקת תאורה לרמקול'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenFaultLog}
+              className="flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+            >
+              <ClipboardList className="h-3.5 w-3.5 text-[#D95B2B]" />
+              <span>יומן תקלות</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Protocol Mode Selector */}
+        <div className="mt-4 flex flex-col gap-2 border-t border-slate-200/80 pt-3.5 dark:border-slate-700/60 sm:flex-row sm:items-center sm:justify-between">
+          <span className="flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-300">
+            <Activity className="h-3.5 w-3.5 text-[#D95B2B]" />
+            <span>פרוטוקול תקשורת תאורה מול הרמקול:</span>
+          </span>
+          <div className="grid grid-cols-3 gap-1 rounded-xl border border-slate-200/80 bg-slate-100/90 p-1 dark:border-slate-700/70 dark:bg-[#141B27]">
+            {PROTOCOL_MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => handleProtocolChange(m.id)}
+                className={`min-h-[32px] rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                  protocolMode === m.id
+                    ? 'bg-[#D95B2B] text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {testFeedback && (
+          <div
+            className={`mt-3 flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-xs ${
+              testFeedback.ok
+                ? 'border-teal-500/40 bg-teal-50/70 text-teal-900 dark:bg-teal-950/30 dark:text-teal-200'
+                : 'border-amber-400/50 bg-amber-50/80 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200'
+            }`}
+          >
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <span>{testFeedback.text}</span>
+          </div>
+        )}
+      </section>
+
       {/* Section 1: Master Lightshow Header, Neon Quick Trigger & Power */}
       <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -81,7 +274,7 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
               סטודיו תאורת מופע וניאון (Lightshow)
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              שליטה מלאה על תאורת ניאון זוהרת, דפוסי תנועה, אזורי הארה פיזיים וסנכרון חי לקצב הבס.
+              שליטה מלאה על תאורת ניאון זוהרת, דפוסי תנועה, אזורי הארה פיזיים וסינכרון חי לשירים המתנגנים בנגן שלך.
             </p>
           </div>
 
@@ -127,10 +320,10 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
         <div className="mt-6 flex flex-col gap-4 border-t border-slate-200/80 pt-5 dark:border-slate-700/60 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-medium text-slate-900 dark:text-white">
-              סנכרון דינמי לקצב המוזיקה והחדר (Beat-Sync)
+              סינכרון דינמי לשירים המתנגנים בנגן שלך (Beat-Sync)
             </div>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              מתאים אוטומטית את מהירות הטבעות והבזקי הניאון להתקפי הסאב-בס ולמוזיקה החיה במיקרופון
+              מתאים אוטומטית את קצב הטבעות ומבזקי הניאון ברמקול לכל מכת בס ב-Spotify, YouTube Music או כל נגן פעיל — ללא העלאת שירים
             </p>
           </div>
 

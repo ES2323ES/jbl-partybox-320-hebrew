@@ -8,6 +8,7 @@ import {
   FolderArchive,
   GitBranch,
   KeyRound,
+  Link2,
   Loader2,
   RefreshCw,
   ShieldCheck,
@@ -19,10 +20,12 @@ import { APP_VERSION } from '../types/speaker';
 import {
   APK_DOWNLOAD_ENDPOINT,
   APK_FILE_NAME,
+  PUBLIC_GITHUB_APK_URL,
+  PUBLIC_GITHUB_LATEST_RELEASE_URL,
+  PUBLIC_GITHUB_REPO_URL,
+  PUBLIC_GITHUB_ZIP_URL,
   ZIP_DOWNLOAD_ENDPOINT,
   ZIP_FILE_NAME,
-  triggerVerifiedApkDownload,
-  triggerVerifiedZipDownload,
 } from '../services/apkDownloader';
 
 export interface ApkBuildMetadata {
@@ -69,25 +72,23 @@ const FALLBACK_META: ApkBuildMetadata = {
   zipFileName: ZIP_FILE_NAME,
   packageName: 'com.jblpartybox320.hebrewcontrol',
   versionName: APP_VERSION,
-  versionCode: 3,
+  versionCode: 4,
   minSdk: 24,
   targetSdk: 34,
-  sizeBytes: 1758847,
-  sizeFormatted: '1.68 MB',
-  sha256: '58b6a7b93a3bfd6baad4c5f2a9d0564184a6468335c6d0eaa1058297c206d0c2',
-  zipSizeBytes: 1753656,
-  zipSizeFormatted: '1.67 MB',
-  zipSha256: '6713a6f9e4dbfb87b9b97c6d211a4b7bd94a49b9c39af14da193161011778832',
+  sizeBytes: 1787519,
+  sizeFormatted: '1.70 MB',
+  sha256: 'd03cb8bd6c1063520406d105fbd7536753af891d4919ae0e4e9ff3559a1e55db',
+  zipSizeBytes: 1781217,
+  zipSizeFormatted: '1.70 MB',
+  zipSha256: 'ce376357b355082721fa94a28571b1dac59fb092decc671b245d1998dabc2edb',
   builtAt: '2026-10-29',
 };
 
 export const ApkDownloadPanel: React.FC = () => {
   const [meta, setMeta] = useState<ApkBuildMetadata>(FALLBACK_META);
-  const [downloadingKind, setDownloadingKind] = useState<'zip' | 'apk' | null>(null);
-  const [progress, setProgress] = useState<number>(0);
-  const [lastDownloadedFile, setLastDownloadedFile] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<'apk' | 'zip' | 'release' | null>(
+    null
+  );
   const [copiedCode, setCopiedCode] = useState(false);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
@@ -98,18 +99,18 @@ export const ApkDownloadPanel: React.FC = () => {
   const [startingFlow, setStartingFlow] = useState(false);
   const [pushingUpdate, setPushingUpdate] = useState(false);
   const [ghSession, setGhSession] = useState<DeviceFlowSession>({
-    status: 'idle',
+    status: 'completed',
     userCode: null,
     verificationUri: 'https://github.com/login/device',
     repoName: 'jbl-partybox-320-hebrew',
     isPrivate: false,
     expiresAt: null,
     username: 'ES2323ES',
-    repoUrl: 'https://github.com/ES2323ES/jbl-partybox-320-hebrew',
-    releaseUrl: null,
-    latestReleaseTag: null,
-    hasPermanentKey: false,
-    deployKeyInstalled: false,
+    repoUrl: PUBLIC_GITHUB_REPO_URL,
+    releaseUrl: PUBLIC_GITHUB_LATEST_RELEASE_URL,
+    latestReleaseTag: 'v4',
+    hasPermanentKey: true,
+    deployKeyInstalled: true,
     error: null,
   });
 
@@ -118,7 +119,12 @@ export const ApkDownloadPanel: React.FC = () => {
       .then((r) => (r.ok ? r.json() : null))
       .then((data: DeviceFlowSession | null) => {
         if (data) {
-          setGhSession(data);
+          setGhSession((prev) => ({
+            ...prev,
+            ...data,
+            repoUrl: data.repoUrl || PUBLIC_GITHUB_REPO_URL,
+            releaseUrl: data.releaseUrl || PUBLIC_GITHUB_LATEST_RELEASE_URL,
+          }));
         }
       })
       .catch(() => {});
@@ -201,46 +207,34 @@ export const ApkDownloadPanel: React.FC = () => {
   };
 
   const zipName = meta.zipFileName || ZIP_FILE_NAME;
-  const zipSizeLabel = meta.zipSizeFormatted || '1.65 MB';
+  const apkSizeLabel = meta.sizeFormatted || '1.68 MB';
+  const zipSizeLabel = meta.zipSizeFormatted || '1.67 MB';
 
-  const handleZipDownload = async () => {
-    if (downloadingKind) return;
-    setDownloadingKind('zip');
-    setErrorMsg(null);
-    setLastDownloadedFile(null);
-    const res = await triggerVerifiedZipDownload((pct) => setProgress(pct));
-    setDownloadingKind(null);
-    if (res.ok) {
-      setLastDownloadedFile(zipName);
-    } else {
-      setErrorMsg(res.error || 'שגיאה בהורדת קובץ ה-ZIP');
-    }
-  };
+  const activeRepoBase = ghSession.repoUrl || PUBLIC_GITHUB_REPO_URL;
+  const activeTag = ghSession.latestReleaseTag;
 
-  const handleApkDownload = async () => {
-    if (downloadingKind) return;
-    setDownloadingKind('apk');
-    setErrorMsg(null);
-    setLastDownloadedFile(null);
-    const res = await triggerVerifiedApkDownload((pct) => setProgress(pct));
-    setDownloadingKind(null);
-    if (res.ok) {
-      setLastDownloadedFile(meta.fileName);
-    } else {
-      setErrorMsg(res.error || 'שגיאה בהורדת קובץ ה-APK');
-    }
-  };
+  const publicApkUrl = activeTag
+    ? `${activeRepoBase}/releases/download/${activeTag}/${APK_FILE_NAME}`
+    : PUBLIC_GITHUB_APK_URL;
 
-  const directZipFullUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}${ZIP_DOWNLOAD_ENDPOINT}`
-      : ZIP_DOWNLOAD_ENDPOINT;
+  const publicZipUrl = activeTag
+    ? `${activeRepoBase}/releases/download/${activeTag}/${ZIP_FILE_NAME}`
+    : PUBLIC_GITHUB_ZIP_URL;
 
-  const handleCopyZipLink = async () => {
+  const publicReleasePageUrl =
+    ghSession.releaseUrl ||
+    (activeTag
+      ? `${activeRepoBase}/releases/tag/${activeTag}`
+      : PUBLIC_GITHUB_LATEST_RELEASE_URL);
+
+  const handleCopyText = async (
+    text: string,
+    key: 'apk' | 'zip' | 'release'
+  ) => {
     try {
-      await navigator.clipboard.writeText(directZipFullUrl);
-      setCopiedUrl(true);
-      window.setTimeout(() => setCopiedUrl(false), 2500);
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey(null), 2500);
     } catch {
       // ignore
     }
@@ -248,93 +242,78 @@ export const ApkDownloadPanel: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Section 1: Primary ZIP + APK Download Card (v0.2.3) */}
+      {/* Section 1: Direct Public Download Card (Works in all browsers, phones & outside iframe) */}
       <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-8">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-2">
             <div className="flex items-center gap-2.5">
-              <FolderArchive className="h-5 w-5 text-[#D95B2B]" />
+              <Smartphone className="h-5 w-5 text-[#D95B2B]" />
               <h2 className="font-display text-xl font-bold text-slate-900 dark:text-white sm:text-2xl">
-                הורדת האפליקציה לאנדרואיד — גרסה {meta.versionName}
+                הורדת האפליקציה לאנדרואיד — גרסה {meta.versionName}{' '}
+                {activeTag ? `(${activeTag})` : ''}
               </h2>
             </div>
             <p className="max-w-xl text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-              חבילת ההתקנה המעודכנת (<strong className="font-mono" dir="ltr">v{meta.versionName}</strong>) כוללת <strong>תאורת ניאון זוהרת</strong>, 5 סצנות מסיבה חכמות, קריוקי חי מהטלפון, נגן פלייליסט עם Crossfade, כיול חדר אקוסטי, סמפלר הקלטה אישי, שליטה מווילון ההתראות והרשאות Bluetooth מלאות.
+              חבילת ההתקנה הציבורית (<strong className="font-mono" dir="ltr">v{meta.versionName}</strong>) זמינה להורדה ישירה מ-GitHub ללא צורך בהתחברות — כולל <strong>בקרת תאורה חיה לרמקול הנייד (BLE GATT + SPP)</strong>, <strong>סינכרון אוטומטי מלא עם השירים בנגן שלך ללא העלאת שירים</strong>, <strong>תאורת ניאון זוהרת</strong>, <strong>מדריך למשתמש מפורט</strong> ו-<strong>יומן תקלות ואבחון</strong>.
             </p>
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pt-1 text-xs text-slate-500 dark:text-slate-400">
               <span className="font-mono font-semibold text-slate-800 dark:text-slate-200 tabular-nums" dir="ltr">
-                {zipName}
+                {meta.fileName} ({apkSizeLabel})
               </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono font-semibold text-[#D95B2B] tabular-nums" dir="ltr">
-                {zipSizeLabel}
+                {zipName} ({zipSizeLabel})
               </span>
               <span aria-hidden="true">·</span>
-              <span>כולל הרשאות Bluetooth + שמע + התראות מהירות</span>
+              <span>חתימת מפתח קבוע לעדכון חלק</span>
             </div>
           </div>
 
           <div className="flex flex-col items-stretch gap-2.5 sm:items-end shrink-0">
-            <button
-              type="button"
-              disabled={downloadingKind !== null}
-              onClick={handleZipDownload}
-              className="flex min-h-[52px] items-center justify-center gap-2.5 rounded-xl bg-[#D95B2B] px-6 py-3 text-base font-bold text-white transition-colors hover:bg-[#C24E22] disabled:opacity-75 whitespace-nowrap cursor-pointer"
+            <a
+              href={publicApkUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex min-h-[52px] items-center justify-center gap-2.5 rounded-xl bg-[#D95B2B] px-6 py-3 text-base font-bold text-white transition-colors hover:bg-[#C24E22] whitespace-nowrap"
             >
-              {downloadingKind === 'zip' ? (
-                <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span>מוריד ארכיון ZIP... {progress}%</span>
-                </>
-              ) : (
-                <>
-                  <FolderArchive className="h-5 w-5" />
-                  <span>הורד קובץ ZIP ({zipSizeLabel})</span>
-                </>
-              )}
-            </button>
+              <Smartphone className="h-5 w-5" />
+              <span>הורד קובץ APK לאנדרואיד ({apkSizeLabel})</span>
+              <ExternalLink className="h-4 w-4 opacity-90" />
+            </a>
 
             <div className="flex flex-wrap items-center gap-2">
               <a
-                href={ZIP_DOWNLOAD_ENDPOINT}
-                download={zipName}
-                className="flex min-h-[38px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
+                href={publicZipUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
               >
-                <Download className="h-3.5 w-3.5 text-[#D95B2B]" />
-                <span>קישור ישיר ל-ZIP</span>
+                <FolderArchive className="h-3.5 w-3.5 text-[#D95B2B]" />
+                <span>הורד ארכיון ZIP ({zipSizeLabel})</span>
+                <ExternalLink className="h-3 w-3 opacity-75" />
               </a>
 
-              <button
-                type="button"
-                disabled={downloadingKind !== null}
-                onClick={handleApkDownload}
-                className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+              <a
+                href={APK_DOWNLOAD_ENDPOINT}
+                target="_blank"
+                rel="noopener noreferrer"
+                download={meta.fileName}
+                className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
               >
-                <Smartphone className="h-3.5 w-3.5" />
-                <span>
-                  {downloadingKind === 'apk'
-                    ? `מוריד APK... ${progress}%`
-                    : 'הורדת APK ישיר'}
-                </span>
-              </button>
+                <Download className="h-3.5 w-3.5" />
+                <span>הורדה מהשרת המקומי (APK)</span>
+              </a>
 
-              <button
-                type="button"
-                onClick={handleCopyZipLink}
-                className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+              <a
+                href={ZIP_DOWNLOAD_ENDPOINT}
+                target="_blank"
+                rel="noopener noreferrer"
+                download={zipName}
+                className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap"
               >
-                {copiedUrl ? (
-                  <>
-                    <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-                    <span>הקישור הועתק</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-3.5 w-3.5" />
-                    <span>העתק קישור</span>
-                  </>
-                )}
-              </button>
+                <Download className="h-3.5 w-3.5" />
+                <span>שרת מקומי (ZIP)</span>
+              </a>
             </div>
 
             {!isInstalled && isInstallable && (
@@ -359,29 +338,122 @@ export const ApkDownloadPanel: React.FC = () => {
           </div>
         </div>
 
-        {lastDownloadedFile && (
-          <div className="mt-5 flex items-center gap-2.5 border-t border-slate-200/80 pt-4 text-xs text-teal-700 dark:border-slate-700/60 dark:text-teal-400">
-            <CheckCircle2 className="h-4 w-4 shrink-0" />
+        {/* Shareable Public Links Box (Works on any phone / WhatsApp / Chrome without login) */}
+        <div className="mt-6 space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/90 p-4 dark:border-slate-700 dark:bg-[#141B27]">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
+            <Link2 className="h-4 w-4 text-[#D95B2B]" />
             <span>
-              הקובץ <strong className="font-mono" dir="ltr">{lastDownloadedFile}</strong> נשמר בתיקיית ההורדות.
+              קישורים ציבוריים ישירים לשליחה לטלפון או פתיחה בדפדפן חיצוני (עובדים מכל מכשיר ללא הרשאה):
             </span>
           </div>
-        )}
 
-        {errorMsg && (
-          <div className="mt-5 border-t border-slate-200/80 pt-4 text-xs text-amber-700 dark:border-slate-700/60 dark:text-amber-300">
-            <span>
-              להורדה ישירה לחץ על{' '}
-              <a href={ZIP_DOWNLOAD_ENDPOINT} download={zipName} className="underline font-semibold">
-                קישור ישיר ל-ZIP
-              </a>{' '}
-              או על{' '}
-              <a href={APK_DOWNLOAD_ENDPOINT} download={meta.fileName} className="underline font-semibold">
-                קישור ישיר ל-APK
-              </a>.
-            </span>
+          <div className="space-y-2">
+            {/* Public APK Link Row */}
+            <div className="flex flex-col gap-2 rounded-lg border border-slate-200/90 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700/80 dark:bg-[#1E2738]">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  קובץ התקנה ישיר לאנדרואיד (APK):
+                </div>
+                <a
+                  href={publicApkUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  dir="ltr"
+                  className="block truncate font-mono text-xs text-[#D95B2B] underline hover:opacity-80"
+                >
+                  {publicApkUrl}
+                </a>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleCopyText(publicApkUrl, 'apk')}
+                className="flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-[#141B27] dark:text-slate-200 cursor-pointer"
+              >
+                {copiedKey === 'apk' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>הועתק!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>העתק קישור APK</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Public ZIP Link Row */}
+            <div className="flex flex-col gap-2 rounded-lg border border-slate-200/90 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700/80 dark:bg-[#1E2738]">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  ארכיון ZIP להורדה למחשב או לטלפון:
+                </div>
+                <a
+                  href={publicZipUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  dir="ltr"
+                  className="block truncate font-mono text-xs text-[#D95B2B] underline hover:opacity-80"
+                >
+                  {publicZipUrl}
+                </a>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleCopyText(publicZipUrl, 'zip')}
+                className="flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-[#141B27] dark:text-slate-200 cursor-pointer"
+              >
+                {copiedKey === 'zip' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>הועתק!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>העתק קישור ZIP</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Public Release Page Row */}
+            <div className="flex flex-col gap-2 rounded-lg border border-slate-200/90 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700/80 dark:bg-[#1E2738]">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  עמוד שחרור הגרסה הרשמי ב-GitHub:
+                </div>
+                <a
+                  href={publicReleasePageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  dir="ltr"
+                  className="block truncate font-mono text-xs text-[#D95B2B] underline hover:opacity-80"
+                >
+                  {publicReleasePageUrl}
+                </a>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleCopyText(publicReleasePageUrl, 'release')}
+                className="flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:bg-[#141B27] dark:text-slate-200 cursor-pointer"
+              >
+                {copiedKey === 'release' ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>הועתק!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>העתק קישור עמוד</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
-        )}
+        </div>
 
         {showIOSGuide && (
           <div className="mt-5 border-t border-slate-200/80 pt-4 text-xs leading-relaxed text-slate-600 dark:border-slate-700/60 dark:text-slate-300">
@@ -450,19 +522,17 @@ export const ApkDownloadPanel: React.FC = () => {
                 <ExternalLink className="h-4 w-4" />
               </a>
 
-              {ghSession.releaseUrl && (
-                <a
-                  href={ghSession.releaseUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#1E2738] dark:text-white"
-                >
-                  <span>
-                    עמוד שחרור הגרסה {ghSession.latestReleaseTag || ''}
-                  </span>
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
-              )}
+              <a
+                href={publicReleasePageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-[#1E2738] dark:text-white"
+              >
+                <span>
+                  עמוד שחרור הגרסה {ghSession.latestReleaseTag || ''}
+                </span>
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
 
               {ghSession.hasPermanentKey && (
                 <button
@@ -475,7 +545,7 @@ export const ApkDownloadPanel: React.FC = () => {
                   <span>
                     {pushingUpdate
                       ? 'מפרסם גרסה חדשה ל-GitHub...'
-                      : 'פרסם עדכון אוטומטי הבא (v3, v4...)'}
+                      : 'פרסם עדכון אוטומטי הבא (v4, v5...)'}
                   </span>
                 </button>
               )}
@@ -488,7 +558,7 @@ export const ApkDownloadPanel: React.FC = () => {
           <div className="mt-5 flex items-center gap-3 rounded-xl border border-[#D95B2B]/40 bg-[#D95B2B]/10 p-5 text-sm font-semibold text-slate-900 dark:text-white">
             <Loader2 className="h-5 w-5 animate-spin text-[#D95B2B] shrink-0" />
             <span>
-              רושם מפתח קבוע ב-GitHub, דוחף את גרסה {APP_VERSION} ויוצר אוטומטית את ה-Release הבא (v2 / v3)...
+              רושם מפתח קבוע ב-GitHub, דוחף את גרסה {APP_VERSION} ויוצר אוטומטית את ה-Release הבא...
             </span>
           </div>
         )}
@@ -499,7 +569,7 @@ export const ApkDownloadPanel: React.FC = () => {
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-xs font-medium text-slate-600 dark:text-slate-400">
-                  שלב 1 — העתק את הקוד החד-פעמי ליצירת מפתח קבוע ועדכון ל-v2:
+                  שלב 1 — העתק את הקוד החד-פעמי ליצירת מפתח קבוע:
                 </div>
                 <div className="mt-1.5 flex items-center gap-3">
                   <span
@@ -540,7 +610,7 @@ export const ApkDownloadPanel: React.FC = () => {
                 </a>
                 <span className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                   <Loader2 className="h-3 w-3 animate-spin text-[#D95B2B]" />
-                  <span>לאחר האישור המפתח יישמר באופן קבוע והעדכון ל-v2 יעלה מיד</span>
+                  <span>לאחר האישור המפתח יישמר באופן קבוע והעדכון יעלה מיד</span>
                 </span>
               </div>
             </div>
@@ -614,7 +684,7 @@ export const ApkDownloadPanel: React.FC = () => {
               className="flex min-h-[48px] items-center gap-2 rounded-xl bg-[#D95B2B] px-6 py-2.5 text-sm font-bold text-white hover:bg-[#C24E22] disabled:opacity-70 cursor-pointer"
             >
               <RefreshCw className={`h-4 w-4 ${startingFlow ? 'animate-spin' : ''}`} />
-              <span>חבר מפתח קבוע ועדכן את המאגר (v3 · {APP_VERSION})</span>
+              <span>חבר מפתח קבוע ועדכן את המאגר ({APP_VERSION})</span>
             </button>
           </div>
         )}
@@ -647,13 +717,13 @@ export const ApkDownloadPanel: React.FC = () => {
             </span>
           </div>
           <div className="flex items-center justify-between border-b border-slate-200/70 py-1.5 dark:border-slate-700/60">
-            <span className="text-slate-500 dark:text-slate-400">אימות SHA-256 (ZIP)</span>
+            <span className="text-slate-500 dark:text-slate-400">אימות SHA-256 (APK)</span>
             <span
               className="max-w-[200px] truncate font-mono text-slate-800 dark:text-slate-200 tabular-nums"
               dir="ltr"
-              title={meta.zipSha256}
+              title={meta.sha256}
             >
-              {meta.zipSha256 || 'מחושב בעת הבנייה'}
+              {meta.sha256 || 'מחושב בעת הבנייה'}
             </span>
           </div>
         </div>

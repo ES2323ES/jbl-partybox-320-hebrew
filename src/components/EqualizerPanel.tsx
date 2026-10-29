@@ -45,6 +45,64 @@ interface EqualizerPanelProps {
 const INDOOR_IMAGE_SRC = indoorImgUrl;
 const OUTDOOR_IMAGE_SRC = outdoorImgUrl;
 
+const W = 720;
+const H = 220;
+const PAD_X = 42;
+const PAD_Y = 24;
+const INNER_W = W - PAD_X * 2;
+const INNER_H = H - PAD_Y * 2;
+
+/**
+ * Isolated <canvas> 28-bar FFT analyzer — updates smoothly via rAF without re-rendering EqualizerPanel!
+ */
+const SpectrumUnderlayCanvas: React.FC = React.memo(() => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let raf: number | null = null;
+    const render = () => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, W, H);
+          const frame = audioEngine.getAnalysisFrame();
+          const bars = frame.spectrum;
+          const stepW = INNER_W / bars.length;
+          const barW = Math.max(4, stepW - 3.5);
+
+          for (let i = 0; i < bars.length; i++) {
+            const val = bars[i];
+            const barH = Math.max(3, val * (INNER_H * 0.88));
+            const x = PAD_X + i * stepW + 1.5;
+            const y = PAD_Y + INNER_H - barH;
+            ctx.fillStyle = `rgba(217, 91, 43, ${(0.14 + val * 0.28).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.roundRect(x, y, barW, barH, 2);
+            ctx.fill();
+          }
+        }
+      }
+      raf = requestAnimationFrame(render);
+    };
+
+    raf = requestAnimationFrame(render);
+    return () => {
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={W}
+      height={H}
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 h-full w-full"
+    />
+  );
+});
+
 export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   eq,
   playtimeBoost,
@@ -62,7 +120,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   onExportFullBackup,
   onImportFullBackupFile,
 }) => {
-  const [spectrum, setSpectrum] = useState<number[]>(() => new Array(28).fill(0.05));
   const [newProfileName, setNewProfileName] = useState('');
   const [showSaveInput, setShowSaveInput] = useState(false);
   const [indoorImgFailed, setIndoorImgFailed] = useState(false);
@@ -78,19 +135,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   const [calibSummary, setCalibSummary] = useState<string | null>(null);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    let raf: number | null = null;
-    const loop = () => {
-      const frame = audioEngine.getAnalysisFrame();
-      setSpectrum(frame.spectrum);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => {
-      if (raf !== null) cancelAnimationFrame(raf);
-    };
-  }, []);
-
   const curvePoints = useMemo(() => {
     return audioEngine.computeCompositeCurve(
       eq.gains,
@@ -100,24 +144,18 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
     );
   }, [eq.gains, eq.bassBoost, eq.environment, playtimeBoost]);
 
-  const W = 720;
-  const H = 220;
-  const PAD_X = 42;
-  const PAD_Y = 24;
-  const innerW = W - PAD_X * 2;
-  const innerH = H - PAD_Y * 2;
   const minLog = Math.log10(25);
   const maxLog = Math.log10(18000);
 
   const freqToX = (freq: number) => {
     const t = (Math.log10(freq) - minLog) / (maxLog - minLog);
-    return PAD_X + Math.max(0, Math.min(1, t)) * innerW;
+    return PAD_X + Math.max(0, Math.min(1, t)) * INNER_W;
   };
 
   const dbToY = (db: number) => {
     const clamped = Math.max(-15, Math.min(15, db));
     const t = (15 - clamped) / 30;
-    return PAD_Y + t * innerH;
+    return PAD_Y + t * INNER_H;
   };
 
   const yToDb = (clientY: number): number => {
@@ -125,7 +163,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
     const rect = svgRef.current.getBoundingClientRect();
     const scaleY = H / rect.height;
     const svgY = (clientY - rect.top) * scaleY;
-    const norm = (svgY - PAD_Y) / innerH;
+    const norm = (svgY - PAD_Y) / INNER_H;
     const rawDb = 15 - norm * 30;
     const clamped = Math.max(-12, Math.min(12, rawDb));
     return Math.round(clamped * 2) / 2;
@@ -214,7 +252,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   return (
     <div className="space-y-6">
       {/* Section 1: 7-Band Parametric/Graphic Equalizer & Real-time Spectrum */}
-      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-white">
@@ -229,7 +267,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               <span dir="ltr" className="font-mono tabular-nums">
                 +12dB
               </span>{' '}
-              ישירות על הגרף או הפעל כיול חדר אוטומטי.
+              מול השירים המתנגנים בנגן שלך בזמן אמת.
             </p>
           </div>
 
@@ -245,7 +283,9 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               ) : (
                 <Mic className="h-3.5 w-3.5 text-[#D95B2B]" />
               )}
-              <span>{calibrating ? `מכייל חלל... ${calibPct}%` : 'כיול אקוסטי חכם (5 ש׳)'}</span>
+              <span>
+                {calibrating ? `מכייל חלל... ${calibPct}%` : 'כיול אקוסטי חכם (5 ש׳)'}
+              </span>
             </button>
 
             <button
@@ -281,7 +321,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                 </div>
                 <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                   <div
-                    className="h-full rounded-full bg-[#D95B2B] transition-all duration-150"
+                    className="h-full rounded-full bg-[#D95B2B] transition-[width] duration-150"
                     style={{ width: `${calibPct}%` }}
                   />
                 </div>
@@ -356,136 +396,124 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
           })}
         </div>
 
-        {/* Live Composite Frequency Response SVG + FFT Spectrum */}
+        {/* Live Composite Frequency Response SVG + Isolated Canvas FFT Spectrum */}
         <div
           className="mt-5 overflow-hidden rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-slate-700/70 dark:bg-[#141B27]"
           dir="ltr"
         >
-          <svg
-            ref={svgRef}
-            viewBox={`0 0 ${W} ${H}`}
-            className="h-48 w-full touch-none select-none sm:h-56"
-            role="img"
-            aria-label="גרף הענות תדרים משולב וספקטרום שמע חי"
-          >
-            <defs>
-              <linearGradient id="eqAreaFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#D95B2B" stopOpacity="0.28" />
-                <stop offset="55%" stopColor="#D95B2B" stopOpacity="0.06" />
-                <stop offset="100%" stopColor="#D95B2B" stopOpacity="0.0" />
-              </linearGradient>
-            </defs>
+          <div className="relative h-48 w-full sm:h-56">
+            <SpectrumUnderlayCanvas />
+            <svg
+              ref={svgRef}
+              viewBox={`0 0 ${W} ${H}`}
+              className="relative z-10 h-full w-full touch-none select-none"
+              role="img"
+              aria-label="גרף הענות תדרים משולב וספקטרום שמע חי"
+            >
+              <defs>
+                <linearGradient id="eqAreaFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#D95B2B" stopOpacity="0.28" />
+                  <stop offset="55%" stopColor="#D95B2B" stopOpacity="0.06" />
+                  <stop offset="100%" stopColor="#D95B2B" stopOpacity="0.0" />
+                </linearGradient>
+              </defs>
 
-            {[-12, -6, 0, 6, 12].map((dbVal) => {
-              const y = dbToY(dbVal);
-              return (
-                <g key={dbVal}>
-                  <line
-                    x1={PAD_X}
-                    y1={y}
-                    x2={W - PAD_X}
-                    y2={y}
-                    stroke={dbVal === 0 ? 'rgba(100,116,139,0.4)' : 'rgba(100,116,139,0.16)'}
-                    strokeDasharray={dbVal === 0 ? undefined : '4 4'}
-                    strokeWidth="1"
-                  />
-                  <text
-                    x={PAD_X - 8}
-                    y={y + 4}
-                    textAnchor="end"
-                    fill="#64748B"
-                    fontSize="10"
-                    fontFamily="JetBrains Mono, monospace"
+              {[-12, -6, 0, 6, 12].map((dbVal) => {
+                const y = dbToY(dbVal);
+                return (
+                  <g key={dbVal}>
+                    <line
+                      x1={PAD_X}
+                      y1={y}
+                      x2={W - PAD_X}
+                      y2={y}
+                      stroke={
+                        dbVal === 0
+                          ? 'rgba(100,116,139,0.4)'
+                          : 'rgba(100,116,139,0.16)'
+                      }
+                      strokeDasharray={dbVal === 0 ? undefined : '4 4'}
+                      strokeWidth="1"
+                    />
+                    <text
+                      x={PAD_X - 8}
+                      y={y + 4}
+                      textAnchor="end"
+                      fill="#64748B"
+                      fontSize="10"
+                      fontFamily="JetBrains Mono, monospace"
+                    >
+                      {dbVal > 0 ? `+${dbVal}` : dbVal}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {EQ_BANDS.map((band) => {
+                const x = freqToX(band.freq);
+                return (
+                  <g key={band.freq}>
+                    <line
+                      x1={x}
+                      y1={PAD_Y}
+                      x2={x}
+                      y2={H - PAD_Y}
+                      stroke="rgba(100,116,139,0.14)"
+                      strokeWidth="1"
+                    />
+                    <text
+                      x={x}
+                      y={H - 6}
+                      textAnchor="middle"
+                      fill="#64748B"
+                      fontSize="10"
+                      fontFamily="JetBrains Mono, monospace"
+                    >
+                      {band.labelHz}
+                    </text>
+                  </g>
+                );
+              })}
+
+              <path d={areaPath} fill="url(#eqAreaFill)" />
+              <path
+                d={linePath}
+                fill="none"
+                stroke="#D95B2B"
+                strokeWidth="2.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+
+              {EQ_BANDS.map((band, idx) => {
+                const x = freqToX(band.freq);
+                const gain = eq.gains[idx] ?? 0;
+                const y = dbToY(gain);
+                const isDragging = draggingBand === idx;
+                return (
+                  <g
+                    key={band.freq}
+                    onPointerDown={(e) => {
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                      setDraggingBand(idx);
+                    }}
+                    onDoubleClick={() => onChangeBandGain(idx, 0)}
+                    className="cursor-ns-resize"
                   >
-                    {dbVal > 0 ? `+${dbVal}` : dbVal}
-                  </text>
-                </g>
-              );
-            })}
-
-            {spectrum.map((val, i) => {
-              const barW = innerW / spectrum.length - 3;
-              const x = PAD_X + i * (innerW / spectrum.length) + 1.5;
-              const barH = Math.max(3, val * (innerH * 0.88));
-              const y = PAD_Y + innerH - barH;
-              return (
-                <rect
-                  key={i}
-                  x={x}
-                  y={y}
-                  width={barW}
-                  height={barH}
-                  rx="2"
-                  fill="#D95B2B"
-                  opacity={0.14 + val * 0.24}
-                />
-              );
-            })}
-
-            {EQ_BANDS.map((band) => {
-              const x = freqToX(band.freq);
-              return (
-                <g key={band.freq}>
-                  <line
-                    x1={x}
-                    y1={PAD_Y}
-                    x2={x}
-                    y2={H - PAD_Y}
-                    stroke="rgba(100,116,139,0.14)"
-                    strokeWidth="1"
-                  />
-                  <text
-                    x={x}
-                    y={H - 6}
-                    textAnchor="middle"
-                    fill="#64748B"
-                    fontSize="10"
-                    fontFamily="JetBrains Mono, monospace"
-                  >
-                    {band.labelHz}
-                  </text>
-                </g>
-              );
-            })}
-
-            <path d={areaPath} fill="url(#eqAreaFill)" />
-            <path
-              d={linePath}
-              fill="none"
-              stroke="#D95B2B"
-              strokeWidth="2.75"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-
-            {EQ_BANDS.map((band, idx) => {
-              const x = freqToX(band.freq);
-              const gain = eq.gains[idx] ?? 0;
-              const y = dbToY(gain);
-              const isDragging = draggingBand === idx;
-              return (
-                <g
-                  key={band.freq}
-                  onPointerDown={(e) => {
-                    e.currentTarget.setPointerCapture(e.pointerId);
-                    setDraggingBand(idx);
-                  }}
-                  onDoubleClick={() => onChangeBandGain(idx, 0)}
-                  className="cursor-ns-resize"
-                >
-                  <circle cx={x} cy={y} r="15" fill="transparent" />
-                  <circle
-                    cx={x}
-                    cy={y}
-                    r={isDragging ? 7.5 : 6}
-                    fill="#D95B2B"
-                    stroke="#FFFFFF"
-                    strokeWidth="2.5"
-                  />
-                </g>
-              );
-            })}
-          </svg>
+                    <circle cx={x} cy={y} r="15" fill="transparent" />
+                    <circle
+                      cx={x}
+                      cy={y}
+                      r={isDragging ? 7.5 : 6}
+                      fill="#D95B2B"
+                      stroke="#FFFFFF"
+                      strokeWidth="2.5"
+                    />
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
         </div>
 
         {/* 7 Hardware Channel Faders */}
@@ -502,7 +530,10 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                   <span className="font-mono text-xs font-semibold text-slate-900 dark:text-white tabular-nums">
                     {band.labelHz}
                   </span>
-                  <span className="text-[11px] text-slate-500 dark:text-slate-400" dir="rtl">
+                  <span
+                    className="text-[11px] text-slate-500 dark:text-slate-400"
+                    dir="rtl"
+                  >
                     {band.hebrewRole}
                   </span>
                 </div>
@@ -514,7 +545,9 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                     max={12}
                     step={0.5}
                     value={gain}
-                    onChange={(e) => onChangeBandGain(idx, Number(e.target.value))}
+                    onChange={(e) =>
+                      onChangeBandGain(idx, Number(e.target.value))
+                    }
                     aria-label={`ערוץ תדר ${band.labelHz}`}
                     className="jbl-slider w-full sm:w-32 sm:-rotate-90"
                   />
@@ -542,7 +575,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-                פרופילים אישיים וגיבוי הגדרות מלא
+                פרופילים אישיים וגיבוי הגדרות מלא (JSON)
               </h3>
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 {savedProfiles.length} פרופילים שמורים במכשיר
@@ -563,7 +596,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                 className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 cursor-pointer whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5 text-[#D95B2B]" />
-                <span>ייצוא גיבוי מלא</span>
+                <span>ייצוא גיבוי הגדרות</span>
               </button>
               <button
                 type="button"
@@ -571,7 +604,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                 className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 cursor-pointer whitespace-nowrap"
               >
                 <Upload className="h-3.5 w-3.5 text-[#D95B2B]" />
-                <span>ייבוא גיבוי</span>
+                <span>שחזור גיבוי הגדרות</span>
               </button>
             </div>
           </div>
@@ -633,7 +666,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
       </section>
 
       {/* Section 2: JBL BassBoost & AI Sound Boost */}
-      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
@@ -685,10 +718,14 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                     {item.title}
                   </span>
                   <Zap
-                    className={`h-4 w-4 ${selected ? 'text-[#D95B2B]' : 'text-slate-400'}`}
+                    className={`h-4 w-4 ${
+                      selected ? 'text-[#D95B2B]' : 'text-slate-400'
+                    }`}
                   />
                 </div>
-                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{item.desc}</p>
+                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                  {item.desc}
+                </p>
               </button>
             );
           })}
@@ -721,7 +758,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
       </section>
 
       {/* Section 3: Acoustic Placement Environment Calibration */}
-      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 dark:border-slate-700/70 dark:bg-[#1E2738]">
         <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
           כיול אקוסטי לפי סביבת הצבה
         </h3>
@@ -746,7 +783,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                 alt="סביבת האזנה ביתית בסלון אקוסטי"
                 referrerPolicy="no-referrer"
                 onError={() => setIndoorImgFailed(true)}
-                className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+                className="absolute inset-0 h-full w-full object-cover"
               />
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/45 to-black/10" />
@@ -757,7 +794,9 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                   חלל פנים / סלון ואולפן
                 </span>
                 <span className="text-xs font-medium text-amber-200">
-                  {eq.environment === AcousticEnvironment.Indoor ? 'נבחר כעת' : 'בחר'}
+                  {eq.environment === AcousticEnvironment.Indoor
+                    ? 'נבחר כעת'
+                    : 'בחר'}
                 </span>
               </div>
               <p className="mt-1 text-xs text-slate-200">
@@ -782,7 +821,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                 alt="סביבת מסיבת חוץ ומרפסת גג פתוחה"
                 referrerPolicy="no-referrer"
                 onError={() => setOutdoorImgFailed(true)}
-                className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+                className="absolute inset-0 h-full w-full object-cover"
               />
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/45 to-black/10" />
@@ -793,7 +832,9 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
                   שטח פתוח / מרפסת וחצר
                 </span>
                 <span className="text-xs font-medium text-amber-200">
-                  {eq.environment === AcousticEnvironment.Outdoor ? 'נבחר כעת' : 'בחר'}
+                  {eq.environment === AcousticEnvironment.Outdoor
+                    ? 'נבחר כעת'
+                    : 'בחר'}
                 </span>
               </div>
               <p className="mt-1 text-xs text-slate-200">

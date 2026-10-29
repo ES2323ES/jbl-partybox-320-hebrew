@@ -61,7 +61,8 @@ export const PartyEffectsPanel: React.FC<PartyEffectsPanelProps> = ({
   const [recordingSlot, setRecordingSlot] = useState<number | null>(null);
   const [samplerError, setSamplerError] = useState<string | null>(null);
   const [karaokeError, setKaraokeError] = useState<string | null>(null);
-  const [voiceMeter, setVoiceMeter] = useState(0);
+  const voiceMeterBarRef = useRef<HTMLDivElement | null>(null);
+  const voiceMeterTextRef = useRef<HTMLSpanElement | null>(null);
   const stopRecordingRef = useRef<(() => void) | null>(null);
 
   const firePad = (id: DjPadEffectId) => {
@@ -89,16 +90,21 @@ export const PartyEffectsPanel: React.FC<PartyEffectsPanelProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Poll live karaoke vocal level when active
+  // Poll live karaoke vocal level via direct DOM refs (zero React re-renders)
   useEffect(() => {
     if (!micGuitar.liveKaraokeActive) {
-      setVoiceMeter(0);
       return;
     }
     let raf: number | null = null;
     const tick = () => {
       const f = audioEngine.getAnalysisFrame();
-      setVoiceMeter(f.karaokeVoiceLevel);
+      const pct = Math.min(100, Math.round(f.karaokeVoiceLevel * 100));
+      if (voiceMeterBarRef.current) {
+        voiceMeterBarRef.current.style.width = `${pct}%`;
+      }
+      if (voiceMeterTextRef.current) {
+        voiceMeterTextRef.current.textContent = `${pct}%`;
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -344,14 +350,19 @@ export const PartyEffectsPanel: React.FC<PartyEffectsPanelProps> = ({
           <div className="mt-4 rounded-xl border border-teal-500/40 bg-teal-50/60 p-3.5 dark:bg-teal-950/25">
             <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-teal-900 dark:text-teal-200">
               <span>מיקרופון קריוקי חי פעיל — עוצמת קול בזמן אמת</span>
-              <span className="font-mono tabular-nums" dir="ltr">
-                {Math.round(voiceMeter * 100)}%
+              <span
+                ref={voiceMeterTextRef}
+                className="font-mono tabular-nums"
+                dir="ltr"
+              >
+                0%
               </span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
               <div
-                className="h-full rounded-full bg-teal-500 transition-all duration-75"
-                style={{ width: `${Math.min(100, Math.round(voiceMeter * 100))}%` }}
+                ref={voiceMeterBarRef}
+                className="h-full rounded-full bg-teal-500"
+                style={{ width: '0%' }}
               />
             </div>
           </div>

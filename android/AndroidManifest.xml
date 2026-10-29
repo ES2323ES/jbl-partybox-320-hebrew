@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.jblpartybox320.hebrewcontrol"
-    android:versionCode="3"
-    android:versionName="0.2.3">
+    android:versionCode="4"
+    android:versionName="0.2.4">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
 
@@ -16,14 +16,14 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
 
-    <!-- Android 12+ (API 31 - 35) Nearby Devices / Bluetooth Speaker Permissions -->
+    <!-- Android 12+ (API 31 - 35) Nearby Devices / Bluetooth Speaker & BLE GATT Permissions -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
-    <!-- Real-time Audio, Speaker Output & Quick Control Notifications -->
+    <!-- Real-time Master Audio Mix Visualizer, Speaker Output & Quick Control Notifications -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

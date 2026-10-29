@@ -4,6 +4,15 @@ export const ZIP_DOWNLOAD_ENDPOINT = '/api/download-zip';
 export const APK_FILE_NAME = 'JBL-PartyBox-320-HE.apk';
 export const ZIP_FILE_NAME = 'JBL-PartyBox-320-HE-APK.zip';
 
+export const PUBLIC_GITHUB_REPO_URL =
+  'https://github.com/ES2323ES/jbl-partybox-320-hebrew';
+export const PUBLIC_GITHUB_LATEST_RELEASE_URL =
+  'https://github.com/ES2323ES/jbl-partybox-320-hebrew/releases/latest';
+export const PUBLIC_GITHUB_APK_URL =
+  'https://github.com/ES2323ES/jbl-partybox-320-hebrew/releases/latest/download/JBL-PartyBox-320-HE.apk';
+export const PUBLIC_GITHUB_ZIP_URL =
+  'https://github.com/ES2323ES/jbl-partybox-320-hebrew/releases/latest/download/JBL-PartyBox-320-HE-APK.zip';
+
 async function downloadVerifiedArchive(
   endpoint: string,
   fileName: string,
@@ -64,6 +73,7 @@ async function downloadVerifiedArchive(
     const anchor = document.createElement('a');
     anchor.href = blobUrl;
     anchor.download = fileName;
+    anchor.rel = 'noopener noreferrer';
     anchor.style.display = 'none';
     document.body.appendChild(anchor);
     anchor.click();
@@ -87,7 +97,7 @@ export function triggerVerifiedZipDownload(
     ZIP_DOWNLOAD_ENDPOINT,
     ZIP_FILE_NAME,
     'application/zip',
-    5206030,
+    1781217,
     onProgress
   );
 }
@@ -99,7 +109,7 @@ export function triggerVerifiedApkDownload(
     APK_DOWNLOAD_ENDPOINT,
     APK_FILE_NAME,
     'application/vnd.android.package-archive',
-    5252881,
+    1787519,
     onProgress
   );
 }
