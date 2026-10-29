@@ -8,6 +8,7 @@ import {
   FolderArchive,
   GitBranch,
   Loader2,
+  RefreshCw,
   ShieldCheck,
   Smartphone,
 } from 'lucide-react';
@@ -38,12 +39,23 @@ export interface ApkBuildMetadata {
   builtAt: string;
 }
 
-interface GithubStatus {
-  connected: boolean;
-  source: 'oauth' | 'env' | null;
+interface DeviceFlowSession {
+  status:
+    | 'idle'
+    | 'awaiting_user'
+    | 'publishing'
+    | 'completed'
+    | 'expired'
+    | 'error';
+  userCode: string | null;
+  verificationUri: string;
+  repoName: string;
+  isPrivate: boolean;
+  expiresAt: number | null;
   username: string | null;
-  profileUrl?: string;
-  oauthConfigured: boolean;
+  repoUrl: string | null;
+  releaseUrl: string | null;
+  error: string | null;
 }
 
 const FALLBACK_META: ApkBuildMetadata = {
@@ -70,31 +82,34 @@ export const ApkDownloadPanel: React.FC = () => {
   const [lastDownloadedFile, setLastDownloadedFile] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
-  // GitHub Publisher States
-  const [ghStatus, setGhStatus] = useState<GithubStatus>({
-    connected: false,
-    source: null,
-    username: null,
-    oauthConfigured: false,
-  });
+  // GitHub Device Flow State
   const [repoName, setRepoName] = useState('jbl-partybox-320-hebrew');
   const [isPrivateRepo, setIsPrivateRepo] = useState(false);
-  const [publishingGh, setPublishingGh] = useState(false);
-  const [ghError, setGhError] = useState<string | null>(null);
-  const [publishedRepo, setPublishedRepo] = useState<{
-    repoUrl: string;
-    releaseUrl: string | null;
-    filesCount: number;
-  } | null>(null);
+  const [startingFlow, setStartingFlow] = useState(false);
+  const [ghSession, setGhSession] = useState<DeviceFlowSession>({
+    status: 'idle',
+    userCode: null,
+    verificationUri: 'https://github.com/login/device',
+    repoName: 'jbl-partybox-320-hebrew',
+    isPrivate: false,
+    expiresAt: null,
+    username: null,
+    repoUrl: null,
+    releaseUrl: null,
+    error: null,
+  });
 
-  const refreshGithubStatus = useCallback(() => {
-    fetch('/api/github/status')
+  const fetchDeviceState = useCallback(() => {
+    fetch('/api/github/device/state')
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: GithubStatus | null) => {
-        if (data) setGhStatus(data);
+      .then((data: DeviceFlowSession | null) => {
+        if (data) {
+          setGhSession(data);
+        }
       })
       .catch(() => {});
   }, []);
@@ -109,81 +124,52 @@ export const ApkDownloadPanel: React.FC = () => {
       })
       .catch(() => {});
 
-    refreshGithubStatus();
-  }, [refreshGithubStatus]);
+    fetchDeviceState();
+  }, [fetchDeviceState]);
 
+  // Poll live status while awaiting user approval on GitHub or while publishing
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin || '';
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
-        return;
-      }
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        refreshGithubStatus();
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [refreshGithubStatus]);
-
-  const handleConnectGithubOAuth = async () => {
-    setGhError(null);
-    try {
-      const origin = encodeURIComponent(window.location.origin);
-      const res = await fetch(`/api/github/auth-url?origin=${origin}`);
-      const data = (await res.json()) as { url?: string; error?: string };
-      if (!res.ok || !data.url) {
-        setGhError(
-          data.error ||
-            'להתחברות ב-OAuth יש להגדיר GITHUB_CLIENT_ID ו-GITHUB_CLIENT_SECRET בחלונית Secrets, או להגדיר GITHUB_TOKEN.'
-        );
-        return;
-      }
-      const popup = window.open(data.url, 'github_oauth_popup', 'width=600,height=720');
-      if (!popup) {
-        setGhError('הדפדפן חסם את החלון הקופץ — אשר חלונות קופצים עבור אתר זה ונסה שוב.');
-      }
-    } catch {
-      setGhError('שגיאה בפתיחת תהליך ההתחברות ל-GitHub.');
+    if (
+      ghSession.status !== 'awaiting_user' &&
+      ghSession.status !== 'publishing'
+    ) {
+      return;
     }
-  };
+    const timer = window.setInterval(fetchDeviceState, 2500);
+    return () => window.clearInterval(timer);
+  }, [ghSession.status, fetchDeviceState]);
 
-  const handlePublishToGithub = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (publishingGh) return;
-    setPublishingGh(true);
-    setGhError(null);
-    setPublishedRepo(null);
-
+  const startGithubDeviceFlow = async (forceNewAuth = false) => {
+    setStartingFlow(true);
     try {
-      const res = await fetch('/api/github/publish', {
+      const res = await fetch('/api/github/device/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           repoName: repoName.trim() || 'jbl-partybox-320-hebrew',
           isPrivate: isPrivateRepo,
+          forceNewAuth,
         }),
       });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        repoUrl?: string;
-        releaseUrl?: string | null;
-        filesCount?: number;
-        error?: string;
-      };
-      if (!res.ok || !data.ok || !data.repoUrl) {
-        setGhError(data.error || 'העלאת הפרויקט ל-GitHub נכשלה.');
-      } else {
-        setPublishedRepo({
-          repoUrl: data.repoUrl,
-          releaseUrl: data.releaseUrl || null,
-          filesCount: data.filesCount || 0,
-        });
+      const data = (await res.json()) as DeviceFlowSession;
+      if (res.ok && data) {
+        setGhSession(data);
       }
     } catch {
-      setGhError('שגיאת תקשורת מול השרת בעת יצירת המאגר.');
+      // ignore
     } finally {
-      setPublishingGh(false);
+      setStartingFlow(false);
+    }
+  };
+
+  const handleCopyDeviceCode = async () => {
+    if (!ghSession.userCode) return;
+    try {
+      await navigator.clipboard.writeText(ghSession.userCode);
+      setCopiedCode(true);
+      window.setTimeout(() => setCopiedCode(false), 2500);
+    } catch {
+      // ignore
     }
   };
 
@@ -235,173 +221,196 @@ export const ApkDownloadPanel: React.FC = () => {
 
   return (
     <div className="space-y-8">
-      {/* Section 1: Publish Project to a Brand-New GitHub Repository */}
-      <section className="rounded-2xl border border-white/[0.1] bg-[#12161E] p-6 sm:p-8">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      {/* Section 1: Live GitHub Device Authorization & Automatic Repo Publisher */}
+      <section className="rounded-2xl border border-[#FF5500]/50 bg-[#12161E] p-6 sm:p-8">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="flex items-center gap-2.5">
               <GitBranch className="h-5 w-5 text-[#FF5500]" />
-              <h2 className="font-display text-xl font-bold text-white">
-                פתיחת פרויקט חדש והעלאה ל-GitHub
+              <h2 className="font-display text-xl font-bold text-white sm:text-2xl">
+                חיבור אוטומטי ל-GitHub ויצירת מאגר חדש
               </h2>
             </div>
             <p className="mt-1 text-sm text-slate-300">
-              יוצר מאגר (Repository) חדש בחשבון ה-GitHub שלך, דוחף את כל קוד המקור והתיעוד, ומצרף אוטומטית את קובצי ה-APK וה-ZIP כ-Release רשמי (`v1.0.0`).
+              ברגע שתאשר את הקוד בקישור של GitHub, השרת ייצור עבורך אוטומטית את המאגר החדש ויעלה את כל הקוד + Release `v1.0.0` עם ה-APK וה-ZIP.
             </p>
-          </div>
-
-          <div className="shrink-0">
-            {ghStatus.connected ? (
-              <span className="text-xs font-medium text-emerald-400">
-                מחובר ל-GitHub: <strong dir="ltr">@{ghStatus.username}</strong>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={refreshGithubStatus}
-                className="min-h-[38px] rounded-xl border border-white/[0.12] bg-white/[0.04] px-3.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/[0.09] whitespace-nowrap cursor-pointer"
-              >
-                בדוק חיבור GitHub
-              </button>
-            )}
           </div>
         </div>
 
-        <form onSubmit={handlePublishToGithub} className="mt-5 space-y-4 border-t border-white/[0.08] pt-5">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div className="sm:col-span-2">
-              <label htmlFor="gh-repo-name" className="mb-1.5 block text-xs font-medium text-slate-300">
-                שם המאגר החדש ב-GitHub
-              </label>
-              <input
-                id="gh-repo-name"
-                type="text"
-                dir="ltr"
-                value={repoName}
-                onChange={(e) => setRepoName(e.target.value)}
-                placeholder="jbl-partybox-320-hebrew"
-                className="min-h-[44px] w-full rounded-xl border border-white/[0.12] bg-[#0B0D11] px-3.5 font-mono text-sm text-white focus:border-[#FF5500] focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <span className="mb-1.5 block text-xs font-medium text-slate-300">
-                נראות המאגר
+        {/* Completed State */}
+        {ghSession.status === 'completed' && ghSession.repoUrl && (
+          <div className="mt-6 space-y-4 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-5">
+            <div className="flex items-center gap-2.5 text-base font-bold text-white">
+              <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0" />
+              <span>
+                המאגר החדש נוצר והועלה בהצלחה לחשבון @{ghSession.username}!
               </span>
-              <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/[0.08] bg-[#0B0D11] p-1 min-h-[44px]">
-                <button
-                  type="button"
-                  onClick={() => setIsPrivateRepo(false)}
-                  className={`rounded-lg text-xs font-semibold transition-colors ${
-                    !isPrivateRepo ? 'bg-[#FF5500] text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  ציבורי (Public)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsPrivateRepo(true)}
-                  className={`rounded-lg text-xs font-semibold transition-colors ${
-                    isPrivateRepo ? 'bg-[#FF5500] text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  פרטי (Private)
-                </button>
-              </div>
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            {ghStatus.connected ? (
-              <button
-                type="submit"
-                disabled={publishingGh}
-                className="flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-[#FF5500] px-6 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#E64D00] disabled:opacity-70 whitespace-nowrap cursor-pointer"
+            <div className="flex flex-wrap items-center gap-3">
+              <a
+                href={ghSession.repoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-[#FF5500] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#E64D00]"
               >
-                {publishingGh ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>יוצר מאגר ומעלה קבצים + Release...</span>
-                  </>
-                ) : (
-                  <>
-                    <GitBranch className="h-4 w-4" />
-                    <span>צור מאגר חדש והעלה ל-GitHub עכשיו</span>
-                  </>
-                )}
-              </button>
-            ) : (
-              <>
-                {ghStatus.oauthConfigured && (
-                  <button
-                    type="button"
-                    onClick={handleConnectGithubOAuth}
-                    className="flex min-h-[46px] items-center gap-2 rounded-xl bg-[#FF5500] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#E64D00] whitespace-nowrap cursor-pointer"
-                  >
-                    <GitBranch className="h-4 w-4" />
-                    <span>התחבר לחשבון GitHub (OAuth)</span>
-                  </button>
-                )}
+                <span>פתח את המאגר החדש ב-GitHub</span>
+                <ExternalLink className="h-4 w-4" />
+              </a>
 
-                <button
-                  type="submit"
-                  disabled={publishingGh}
-                  className="flex min-h-[46px] items-center gap-2 rounded-xl bg-[#FF5500] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#E64D00] disabled:opacity-70 whitespace-nowrap cursor-pointer"
-                >
-                  <GitBranch className="h-4 w-4" />
-                  <span>צור מאגר והעלה ל-GitHub</span>
-                </button>
-              </>
-            )}
-          </div>
-
-          {!ghStatus.connected && (
-            <p className="text-xs leading-relaxed text-slate-400">
-              טיפ מהיר: ניתן ללחוץ על <strong>סמל ה-GitHub בסרגל העליון של AI Studio</strong> לייצוא ישיר לחשבונך, או להוסיף משתנה <code className="font-mono text-slate-200">GITHUB_TOKEN</code> בחלונית ה-<strong>Secrets</strong> וללחוץ על הכפתור למעלה ליצירה אוטומטית כולל Release APK.
-            </p>
-          )}
-
-          {ghError && (
-            <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3.5 text-xs leading-relaxed text-amber-300">
-              {ghError}
-            </div>
-          )}
-
-          {publishedRepo && (
-            <div className="space-y-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4 text-xs text-emerald-300">
-              <div className="flex items-center gap-2 font-semibold text-white">
-                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                <span>המאגר נוצר והועלה בהצלחה ({publishedRepo.filesCount} קבצים + Release v1.0.0)!</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-4 pt-1">
+              {ghSession.releaseUrl && (
                 <a
-                  href={publishedRepo.repoUrl}
+                  href={ghSession.releaseUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 font-semibold text-[#FF5500] underline"
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-white/[0.15] bg-white/[0.06] px-4 py-2.5 text-xs font-semibold text-white hover:bg-white/[0.12]"
                 >
-                  <span>פתיחת המאגר ב-GitHub</span>
+                  <span>עמוד ה-Release (הורדת APK ו-ZIP)</span>
                   <ExternalLink className="h-3.5 w-3.5" />
                 </a>
-                {publishedRepo.releaseUrl && (
-                  <a
-                    href={publishedRepo.releaseUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 font-semibold text-white underline"
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Publishing in Progress State */}
+        {ghSession.status === 'publishing' && (
+          <div className="mt-6 flex items-center gap-3 rounded-xl border border-[#FF5500]/40 bg-[#FF5500]/10 p-5 text-sm font-semibold text-white">
+            <Loader2 className="h-5 w-5 animate-spin text-[#FF5500] shrink-0" />
+            <span>
+              האישור התקבל! יוצר כעת את המאגר <strong className="font-mono" dir="ltr">{ghSession.repoName}</strong> ומעלה את כל הקבצים וה-APK...
+            </span>
+          </div>
+        )}
+
+        {/* Active Device Code Waiting for User Approval */}
+        {ghSession.status === 'awaiting_user' && ghSession.userCode && (
+          <div className="mt-6 space-y-4 rounded-xl border border-white/[0.1] bg-[#0B0D11] p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-xs font-medium text-slate-400">
+                  שלב 1 — העתק את קוד האישור החד-פעמי:
+                </div>
+                <div className="mt-1.5 flex items-center gap-3">
+                  <span
+                    className="font-mono text-2xl font-bold tracking-widest text-[#FF5500] sm:text-3xl"
+                    dir="ltr"
                   >
-                    <span>פתיחת עמוד ה-Release (הורדת APK)</span>
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
+                    {ghSession.userCode}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyDeviceCode}
+                    className="flex min-h-[38px] items-center gap-1.5 rounded-lg border border-white/[0.12] bg-white/[0.05] px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/[0.12] cursor-pointer"
+                  >
+                    {copiedCode ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-400" />
+                        <span>הועתק</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" />
+                        <span>העתק קוד</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col items-stretch sm:items-end gap-2">
+                <a
+                  href={ghSession.verificationUri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-[#FF5500] px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-[#FF5500]/20 hover:bg-[#E64D00] whitespace-nowrap"
+                >
+                  <span>שלב 2 — פתח את GitHub לאישור החשבון</span>
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+                <span className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                  <Loader2 className="h-3 w-3 animate-spin text-[#FF5500]" />
+                  <span>ממתין לאישור שלך ב-GitHub... ההעלאה תתחיל אוטומטית מיד לאחר האישור</span>
+                </span>
               </div>
             </div>
-          )}
-        </form>
+          </div>
+        )}
+
+        {/* Idle / Expired / Error / Custom Repo Config */}
+        {(ghSession.status === 'idle' ||
+          ghSession.status === 'expired' ||
+          ghSession.status === 'error') && (
+          <div className="mt-5 space-y-4 border-t border-white/[0.08] pt-5">
+            {ghSession.error && (
+              <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3.5 text-xs text-amber-300">
+                {ghSession.error}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="sm:col-span-2">
+                <label
+                  htmlFor="gh-repo-name"
+                  className="mb-1.5 block text-xs font-medium text-slate-300"
+                >
+                  שם המאגר החדש שייווצר ב-GitHub
+                </label>
+                <input
+                  id="gh-repo-name"
+                  type="text"
+                  dir="ltr"
+                  value={repoName}
+                  onChange={(e) => setRepoName(e.target.value)}
+                  className="min-h-[44px] w-full rounded-xl border border-white/[0.12] bg-[#0B0D11] px-3.5 font-mono text-sm text-white focus:border-[#FF5500] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <span className="mb-1.5 block text-xs font-medium text-slate-300">
+                  סוג מאגר
+                </span>
+                <div className="grid min-h-[44px] grid-cols-2 gap-1.5 rounded-xl border border-white/[0.08] bg-[#0B0D11] p-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsPrivateRepo(false)}
+                    className={`rounded-lg text-xs font-semibold transition-colors ${
+                      !isPrivateRepo
+                        ? 'bg-[#FF5500] text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    ציבורי
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsPrivateRepo(true)}
+                    className={`rounded-lg text-xs font-semibold transition-colors ${
+                      isPrivateRepo
+                        ? 'bg-[#FF5500] text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    פרטי
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={startingFlow}
+              onClick={() => startGithubDeviceFlow(false)}
+              className="flex min-h-[48px] items-center gap-2 rounded-xl bg-[#FF5500] px-6 py-2.5 text-sm font-bold text-white hover:bg-[#E64D00] disabled:opacity-70 cursor-pointer"
+            >
+              <RefreshCw className={`h-4 w-4 ${startingFlow ? 'animate-spin' : ''}`} />
+              <span>הפק קוד אישור חדש ל-GitHub והעלה אוטומטית</span>
+            </button>
+          </div>
+        )}
       </section>
 
       {/* Section 2: Primary ZIP + APK Download Card */}
-      <section className="rounded-2xl border border-[#FF5500]/45 bg-[#12161E] p-6 sm:p-8">
+      <section className="rounded-2xl border border-white/[0.08] bg-[#12161E] p-6 sm:p-8">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-2">
             <div className="flex items-center gap-2.5">

@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -10,90 +11,54 @@ dotenv.config();
 const PORT = 3000;
 const APK_FILENAME = 'JBL-PartyBox-320-HE.apk';
 const ZIP_FILENAME = 'JBL-PartyBox-320-HE-APK.zip';
+const GH_DEVICE_CLIENT_ID = '178c6fc778ccc68e1d6a';
+const PUBLISHED_RESULT_FILE = '/tmp/gh_published_repo.json';
 
-// In-memory store for OAuth tokens mapped by HttpOnly session ID
-const oauthSessions = new Map<string, string>();
+interface DeviceFlowSession {
+  status:
+    | 'idle'
+    | 'awaiting_user'
+    | 'publishing'
+    | 'completed'
+    | 'expired'
+    | 'error';
+  userCode: string | null;
+  verificationUri: string;
+  repoName: string;
+  isPrivate: boolean;
+  expiresAt: number | null;
+  username: string | null;
+  repoUrl: string | null;
+  releaseUrl: string | null;
+  error: string | null;
+}
 
-function parseCookies(cookieHeader?: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!cookieHeader) return out;
-  for (const part of cookieHeader.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx > 0) {
-      const k = part.slice(0, idx).trim();
-      const v = decodeURIComponent(part.slice(idx + 1).trim());
-      out[k] = v;
+let deviceSession: DeviceFlowSession = {
+  status: 'idle',
+  userCode: null,
+  verificationUri: 'https://github.com/login/device',
+  repoName: 'jbl-partybox-320-hebrew',
+  isPrivate: false,
+  expiresAt: null,
+  username: null,
+  repoUrl: null,
+  releaseUrl: null,
+  error: null,
+};
+
+let activePollTimer: ReturnType<typeof setTimeout> | null = null;
+let connectedGithubToken: string | null = null;
+
+// Restore previous completed state if server restarted after publish
+try {
+  if (fs.existsSync(PUBLISHED_RESULT_FILE)) {
+    const saved = JSON.parse(fs.readFileSync(PUBLISHED_RESULT_FILE, 'utf-8'));
+    if (saved?.repoUrl) {
+      deviceSession = { ...deviceSession, ...saved, status: 'completed' };
     }
   }
-  return out;
-}
-
-function getEffectiveGithubToken(req: express.Request): {
-  token: string | null;
-  source: 'oauth' | 'env' | null;
-} {
-  const cookies = parseCookies(req.headers.cookie);
-  const sid = cookies['gh_session_id'];
-  if (sid && oauthSessions.has(sid)) {
-    return { token: oauthSessions.get(sid)!, source: 'oauth' };
-  }
-  const envToken = process.env.GITHUB_TOKEN?.trim();
-  if (envToken) {
-    return { token: envToken, source: 'env' };
-  }
-  return { token: null, source: null };
-}
-
-function getCallbackUrl(req: express.Request): string {
-  const queryOrigin =
-    typeof req.query.origin === 'string' && req.query.origin.startsWith('http')
-      ? req.query.origin.replace(/\/$/, '')
-      : null;
-  const appUrl = process.env.APP_URL?.trim()?.replace(/\/$/, '');
-  const base =
-    queryOrigin ||
-    (appUrl && appUrl.startsWith('http') ? appUrl : `http://localhost:${PORT}`);
-  return `${base}/auth/github/callback`;
-}
-
-function collectProjectFiles(rootDir: string): Array<{ relPath: string; absPath: string }> {
-  const ignoreDirs = new Set([
-    'node_modules',
-    'dist',
-    'build',
-    '.git',
-    'coverage',
-  ]);
-  const ignoreFiles = new Set([
-    '.DS_Store',
-    ZIP_FILENAME,
-    APK_FILENAME, // Uploaded separately as GitHub Release binary assets to keep git tree fast
-  ]);
-
-  const results: Array<{ relPath: string; absPath: string }> = [];
-
-  const walk = (dir: string) => {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.env') && entry.name !== '.env.example') {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        if (!ignoreDirs.has(entry.name)) {
-          walk(path.join(dir, entry.name));
-        }
-      } else if (entry.isFile()) {
-        if (!ignoreFiles.has(entry.name) && !entry.name.endsWith('.log')) {
-          const absPath = path.join(dir, entry.name);
-          const relPath = path.relative(rootDir, absPath).split(path.sep).join('/');
-          results.push({ relPath, absPath });
-        }
-      }
-    }
-  };
-
-  walk(rootDir);
-  return results;
+} catch {
+  // ignore
 }
 
 async function ghFetch(
@@ -107,6 +72,159 @@ async function ghFetch(
   headers.set('X-GitHub-Api-Version', '2022-11-28');
   headers.set('User-Agent', 'JBL-PartyBox-320-Studio-Publisher');
   return fetch(url, { ...init, headers });
+}
+
+async function createAndPushGithubRepo(
+  rootDir: string,
+  token: string,
+  requestedName: string,
+  isPrivate: boolean,
+  resolveStaticBinary: (name: string) => string | null
+): Promise<{ username: string; repoUrl: string; releaseUrl: string | null }> {
+  // 1. Identify authenticated GitHub user
+  const userRes = await ghFetch('https://api.github.com/user', token);
+  if (!userRes.ok) {
+    throw new Error(`אימות משתמש ב-GitHub נכשל (HTTP ${userRes.status})`);
+  }
+  const userData = (await userRes.json()) as { login: string };
+  const username = userData.login;
+
+  const cleanBaseName =
+    requestedName.trim().replace(/[^a-zA-Z0-9._-]/g, '-') ||
+    'jbl-partybox-320-hebrew';
+  const description =
+    'אפליקציית שליטה ייעודית בעברית לרמקול JBL PartyBox Stage 320 כולל תאורת מופע, איקוולייזר 7 ערוצים וקובץ APK לאנדרואיד';
+
+  // 2. Create brand-new GitHub repository (fallback with suffix if name already exists)
+  let repoInfo: { full_name: string; html_url: string } | null = null;
+  const candidateNames = [
+    cleanBaseName,
+    `${cleanBaseName}-app`,
+    `${cleanBaseName}-${Math.floor(100 + Math.random() * 900)}`,
+  ];
+
+  let lastErr = '';
+  for (const candidate of candidateNames) {
+    const createRes = await ghFetch('https://api.github.com/user/repos', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: candidate,
+        description,
+        private: isPrivate,
+        auto_init: false,
+      }),
+    });
+
+    if (createRes.ok) {
+      repoInfo = (await createRes.json()) as {
+        full_name: string;
+        html_url: string;
+      };
+      break;
+    } else {
+      const errJson = (await createRes.json().catch(() => ({}))) as {
+        message?: string;
+        errors?: Array<{ message?: string }>;
+      };
+      lastErr = errJson.errors?.[0]?.message || errJson.message || `HTTP ${createRes.status}`;
+      if (createRes.status !== 422) {
+        break;
+      }
+    }
+  }
+
+  if (!repoInfo) {
+    throw new Error(`יצירת המאגר נכשלה: ${lastErr}`);
+  }
+
+  const fullName = repoInfo.full_name;
+
+  // 3. Ensure local git commit is up to date and push full repo to main
+  try {
+    execFileSync('git', ['add', '-A'], { cwd: rootDir, stdio: 'ignore' });
+    execFileSync(
+      'git',
+      ['commit', '-m', 'chore: sync latest JBL PartyBox 320 build'],
+      { cwd: rootDir, stdio: 'ignore' }
+    );
+  } catch {
+    // Working tree already clean — proceed to push
+  }
+
+  const pushUrl = `https://x-access-token:${encodeURIComponent(token)}@github.com/${fullName}.git`;
+  execFileSync('git', ['push', '--force', pushUrl, 'HEAD:refs/heads/main'], {
+    cwd: rootDir,
+    stdio: 'pipe',
+  });
+
+  // 4. Create GitHub Release v1.0.0 with signed APK & ZIP assets
+  let releaseUrl: string | null = null;
+  const releaseRes = await ghFetch(
+    `https://api.github.com/repos/${fullName}/releases`,
+    token,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: 'v1.0.0',
+        target_commitish: 'main',
+        name: 'JBL PartyBox 320 Hebrew Control v1.0.0 (Android APK + ZIP)',
+        body: 'גרסה ראשונה ומוכנה להתקנה של אפליקציית השליטה בעברית לרמקול **JBL PartyBox Stage 320**.\n\n### קבצים מצורפים להורדה:\n- `JBL-PartyBox-320-HE-APK.zip` — ארכיון ZIP הכולל את ה-APK והוראות התקנה\n- `JBL-PartyBox-320-HE.apk` — קובץ התקנה ישיר וחתום לאנדרואיד',
+        draft: false,
+        prerelease: false,
+      }),
+    }
+  );
+
+  if (releaseRes.ok) {
+    const relData = (await releaseRes.json()) as {
+      html_url: string;
+      upload_url: string;
+    };
+    releaseUrl = relData.html_url;
+    const uploadBase = relData.upload_url.split('{')[0];
+
+    const apkPath = resolveStaticBinary(APK_FILENAME);
+    if (apkPath) {
+      const apkBytes = fs.readFileSync(apkPath);
+      await ghFetch(
+        `${uploadBase}?name=${encodeURIComponent(APK_FILENAME)}`,
+        token,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/vnd.android.package-archive',
+            'Content-Length': String(apkBytes.byteLength),
+          },
+          body: apkBytes,
+        }
+      );
+    }
+
+    const zipPath = resolveStaticBinary(ZIP_FILENAME);
+    if (zipPath) {
+      const zipBytes = fs.readFileSync(zipPath);
+      await ghFetch(
+        `${uploadBase}?name=${encodeURIComponent(ZIP_FILENAME)}`,
+        token,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Length': String(zipBytes.byteLength),
+          },
+          body: zipBytes,
+        }
+      );
+    }
+  }
+
+  return {
+    username,
+    repoUrl: repoInfo.html_url,
+    releaseUrl,
+  };
 }
 
 async function startServer() {
@@ -178,342 +296,221 @@ async function startServer() {
     res.status(404).json({ error: 'Metadata not found' });
   });
 
-  // --- GitHub OAuth & Repository Publisher Routes ---
+  // --- GitHub Device Flow Automatic Repo Creator & Pusher ---
 
-  app.get('/api/github/status', async (req, res) => {
-    const { token, source } = getEffectiveGithubToken(req);
-    const oauthConfigured = Boolean(
-      process.env.GITHUB_CLIENT_ID?.trim() &&
-        process.env.GITHUB_CLIENT_SECRET?.trim()
-    );
-
-    if (!token) {
-      res.json({
-        connected: false,
-        source: null,
-        username: null,
-        oauthConfigured,
-      });
-      return;
+  app.get('/api/github/device/state', (_req, res) => {
+    if (
+      deviceSession.status === 'awaiting_user' &&
+      deviceSession.expiresAt &&
+      Date.now() > deviceSession.expiresAt
+    ) {
+      deviceSession.status = 'expired';
     }
-
-    try {
-      const userRes = await ghFetch('https://api.github.com/user', token);
-      if (!userRes.ok) {
-        res.json({
-          connected: false,
-          source: null,
-          username: null,
-          oauthConfigured,
-        });
-        return;
-      }
-      const userData = (await userRes.json()) as { login: string; html_url: string };
-      res.json({
-        connected: true,
-        source,
-        username: userData.login,
-        profileUrl: userData.html_url,
-        oauthConfigured,
-      });
-    } catch {
-      res.json({
-        connected: false,
-        source: null,
-        username: null,
-        oauthConfigured,
-      });
-    }
+    res.json(deviceSession);
   });
 
-  app.get('/api/github/auth-url', (req, res) => {
-    const clientId = process.env.GITHUB_CLIENT_ID?.trim();
-    if (!clientId) {
-      res.status(400).json({
-        error: 'GITHUB_CLIENT_ID is not configured in Secrets.',
-      });
-      return;
-    }
-    const redirectUri = getCallbackUrl(req);
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      scope: 'repo',
-    });
-    res.json({
-      url: `https://github.com/login/oauth/authorize?${params.toString()}`,
-    });
-  });
-
-  const githubCallbackHandler: express.RequestHandler = async (req, res) => {
-    const code = typeof req.query.code === 'string' ? req.query.code : '';
-    const clientId = process.env.GITHUB_CLIENT_ID?.trim();
-    const clientSecret = process.env.GITHUB_CLIENT_SECRET?.trim();
-
-    if (!code || !clientId || !clientSecret) {
-      res.status(400).send('Missing GitHub OAuth code or client credentials.');
-      return;
-    }
-
-    try {
-      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          client_id: clientId,
-          client_secret: clientSecret,
-          code,
-        }),
-      });
-      const tokenData = (await tokenRes.json()) as { access_token?: string };
-      if (!tokenData.access_token) {
-        res.status(400).send('Failed to obtain GitHub access token.');
-        return;
-      }
-
-      const sid = crypto.randomBytes(24).toString('hex');
-      oauthSessions.set(sid, tokenData.access_token);
-
-      res.setHeader(
-        'Set-Cookie',
-        `gh_session_id=${sid}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=86400`
-      );
-
-      res.send(`<!doctype html>
-<html lang="he" dir="rtl">
-  <body style="background:#0B0D11;color:#F3F5F8;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-    <script>
-      if (window.opener) {
-        window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-        window.close();
-      } else {
-        window.location.href = '/';
-      }
-    </script>
-    <p>ההתחברות ל-GitHub הצליחה. החלון ייסגר אוטומטית...</p>
-  </body>
-</html>`);
-    } catch {
-      res.status(500).send('GitHub OAuth exchange error.');
-    }
-  };
-
-  app.get(['/auth/github/callback', '/auth/github/callback/'], githubCallbackHandler);
-
-  app.post('/api/github/publish', async (req, res) => {
-    const { token } = getEffectiveGithubToken(req);
-    if (!token) {
-      res.status(401).json({
-        error:
-          'לא נמצא חיבור פעיל ל-GitHub. הגדר GITHUB_TOKEN בחלונית ה-Secrets או התחבר דרך OAuth.',
-      });
-      return;
-    }
-
-    const rawName =
+  app.post('/api/github/device/start', async (req, res) => {
+    const repoName =
       typeof req.body?.repoName === 'string' && req.body.repoName.trim()
         ? req.body.repoName.trim()
         : 'jbl-partybox-320-hebrew';
-    const repoName = rawName.replace(/[^a-zA-Z0-9._-]/g, '-');
     const isPrivate = Boolean(req.body?.isPrivate);
-    const description =
-      typeof req.body?.description === 'string' && req.body.description.trim()
-        ? req.body.description.trim()
-        : 'אפליקציית שליטה ייעודית בעברית לרמקול JBL PartyBox Stage 320 כולל תאורת מופע, איקוולייזר 7 ערוצים וקובץ APK לאנדרואיד';
+
+    // If already authenticated via previous session or GITHUB_TOKEN env, publish immediately!
+    const existingToken = connectedGithubToken || process.env.GITHUB_TOKEN?.trim() || null;
+    if (existingToken && req.body?.forceNewAuth !== true) {
+      deviceSession = {
+        status: 'publishing',
+        userCode: null,
+        verificationUri: 'https://github.com/login/device',
+        repoName,
+        isPrivate,
+        expiresAt: null,
+        username: deviceSession.username,
+        repoUrl: null,
+        releaseUrl: null,
+        error: null,
+      };
+      res.json(deviceSession);
+
+      createAndPushGithubRepo(
+        rootDir,
+        existingToken,
+        repoName,
+        isPrivate,
+        resolveStaticBinary
+      )
+        .then((out) => {
+          deviceSession = {
+            ...deviceSession,
+            status: 'completed',
+            username: out.username,
+            repoUrl: out.repoUrl,
+            releaseUrl: out.releaseUrl,
+            error: null,
+          };
+          fs.writeFileSync(PUBLISHED_RESULT_FILE, JSON.stringify(deviceSession, null, 2));
+        })
+        .catch((err) => {
+          deviceSession = {
+            ...deviceSession,
+            status: 'error',
+            error: err instanceof Error ? err.message : 'שגיאה בהעלאה ל-GitHub',
+          };
+        });
+      return;
+    }
+
+    if (activePollTimer) {
+      clearTimeout(activePollTimer);
+      activePollTimer = null;
+    }
 
     try {
-      // 1. Create the new repository with auto_init: true so Git Data API works immediately
-      const createRes = await ghFetch('https://api.github.com/user/repos', token, {
+      const codeRes = await fetch('https://github.com/login/device/code', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: repoName,
-          description,
-          private: isPrivate,
-          auto_init: true,
-        }),
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          client_id: GH_DEVICE_CLIENT_ID,
+          scope: 'repo workflow',
+        }).toString(),
       });
 
-      if (!createRes.ok) {
-        const errBody = (await createRes.json().catch(() => ({}))) as {
-          message?: string;
-          errors?: Array<{ message?: string }>;
-        };
-        const detail =
-          errBody.errors?.[0]?.message || errBody.message || `HTTP ${createRes.status}`;
-        res.status(createRes.status).json({
-          error: `יצירת המאגר ב-GitHub נכשלה: ${detail}`,
-        });
+      if (!codeRes.ok) {
+        res.status(502).json({ error: 'שגיאה בקבלת קוד אימות מ-GitHub' });
         return;
       }
 
-      const repoInfo = (await createRes.json()) as {
-        full_name: string;
-        html_url: string;
-        default_branch: string;
-        owner: { login: string };
+      const codeData = (await codeRes.json()) as {
+        device_code: string;
+        user_code: string;
+        verification_uri: string;
+        expires_in: number;
+        interval: number;
       };
-      const fullName = repoInfo.full_name;
-      const branch = repoInfo.default_branch || 'main';
 
-      // 2. Fetch current HEAD commit & base tree
-      const refRes = await ghFetch(
-        `https://api.github.com/repos/${fullName}/git/ref/heads/${branch}`,
-        token
-      );
-      const refData = (await refRes.json()) as { object: { sha: string } };
-      const parentSha = refData.object.sha;
+      const expiresAt = Date.now() + codeData.expires_in * 1000;
+      let pollIntervalMs = Math.max(5500, (codeData.interval || 5) * 1000 + 500);
 
-      // 3. Upload all source & asset files as Git Blobs
-      const files = collectProjectFiles(rootDir);
-      const treeEntries: Array<{
-        path: string;
-        mode: '100644';
-        type: 'blob';
-        sha: string;
-      }> = [];
+      deviceSession = {
+        status: 'awaiting_user',
+        userCode: codeData.user_code,
+        verificationUri: codeData.verification_uri || 'https://github.com/login/device',
+        repoName,
+        isPrivate,
+        expiresAt,
+        username: null,
+        repoUrl: null,
+        releaseUrl: null,
+        error: null,
+      };
 
-      for (const file of files) {
-        const contentBase64 = fs.readFileSync(file.absPath).toString('base64');
-        const blobRes = await ghFetch(
-          `https://api.github.com/repos/${fullName}/git/blobs`,
-          token,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              content: contentBase64,
-              encoding: 'base64',
-            }),
+      const pollOnce = async () => {
+        if (deviceSession.status !== 'awaiting_user') return;
+        if (Date.now() > expiresAt) {
+          deviceSession.status = 'expired';
+          return;
+        }
+
+        try {
+          const tokenRes = await fetch(
+            'https://github.com/login/oauth/access_token',
+            {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: new URLSearchParams({
+                client_id: GH_DEVICE_CLIENT_ID,
+                device_code: codeData.device_code,
+                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+              }).toString(),
+            }
+          );
+
+          const tokenData = (await tokenRes.json()) as {
+            access_token?: string;
+            error?: string;
+          };
+
+          if (tokenData.access_token) {
+            connectedGithubToken = tokenData.access_token;
+            deviceSession.status = 'publishing';
+
+            try {
+              const out = await createAndPushGithubRepo(
+                rootDir,
+                tokenData.access_token,
+                deviceSession.repoName,
+                deviceSession.isPrivate,
+                resolveStaticBinary
+              );
+              deviceSession = {
+                ...deviceSession,
+                status: 'completed',
+                username: out.username,
+                repoUrl: out.repoUrl,
+                releaseUrl: out.releaseUrl,
+                error: null,
+              };
+              fs.writeFileSync(
+                PUBLISHED_RESULT_FILE,
+                JSON.stringify(deviceSession, null, 2)
+              );
+            } catch (pubErr) {
+              deviceSession = {
+                ...deviceSession,
+                status: 'error',
+                error:
+                  pubErr instanceof Error
+                    ? pubErr.message
+                    : 'שגיאה ביצירת המאגר ב-GitHub',
+              };
+            }
+            return;
           }
-        );
-        if (blobRes.ok) {
-          const blobData = (await blobRes.json()) as { sha: string };
-          treeEntries.push({
-            path: file.relPath,
-            mode: '100644',
-            type: 'blob',
-            sha: blobData.sha,
-          });
-        }
-      }
 
-      // 4. Create Git Tree & Commit
-      const treeRes = await ghFetch(
-        `https://api.github.com/repos/${fullName}/git/trees`,
-        token,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tree: treeEntries }),
-        }
-      );
-      const treeData = (await treeRes.json()) as { sha: string };
-
-      const commitRes = await ghFetch(
-        `https://api.github.com/repos/${fullName}/git/commits`,
-        token,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message:
-              'feat: JBL PartyBox Stage 320 Hebrew control app with Lightshow & 7-band EQ',
-            tree: treeData.sha,
-            parents: [parentSha],
-          }),
-        }
-      );
-      const commitData = (await commitRes.json()) as { sha: string };
-
-      await ghFetch(
-        `https://api.github.com/repos/${fullName}/git/refs/heads/${branch}`,
-        token,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: commitData.sha, force: true }),
-        }
-      );
-
-      // 5. Create GitHub Release v1.0.0 and attach both signed APK and ZIP binary assets
-      let releaseUrl: string | null = null;
-      const releaseRes = await ghFetch(
-        `https://api.github.com/repos/${fullName}/releases`,
-        token,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tag_name: 'v1.0.0',
-            name: 'JBL PartyBox 320 Hebrew Control v1.0.0 (Android APK)',
-            body: 'גרסה ראשונה של אפליקציית השליטה בעברית ל-JBL PartyBox Stage 320 כולל קובץ APK חתום לאנדרואיד וארכיון ZIP.',
-            draft: false,
-            prerelease: false,
-          }),
-        }
-      );
-
-      if (releaseRes.ok) {
-        const relData = (await releaseRes.json()) as {
-          html_url: string;
-          upload_url: string;
-        };
-        releaseUrl = relData.html_url;
-        const uploadBase = relData.upload_url.split('{')[0];
-
-        const apkPath = resolveStaticBinary(APK_FILENAME);
-        if (apkPath) {
-          const apkBytes = fs.readFileSync(apkPath);
-          await ghFetch(
-            `${uploadBase}?name=${encodeURIComponent(APK_FILENAME)}`,
-            token,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/vnd.android.package-archive',
-                'Content-Length': String(apkBytes.byteLength),
-              },
-              body: apkBytes,
-            }
-          );
+          if (tokenData.error === 'slow_down') {
+            pollIntervalMs += 5000;
+          } else if (
+            tokenData.error === 'expired_token' ||
+            tokenData.error === 'access_denied'
+          ) {
+            deviceSession = {
+              ...deviceSession,
+              status: 'expired',
+              error:
+                tokenData.error === 'access_denied'
+                  ? 'האישור בוטל על ידי המשתמש.'
+                  : 'פג תוקף הקוד — לחץ ליצירת קוד חדש.',
+            };
+            return;
+          }
+        } catch {
+          // transient network error, continue polling
         }
 
-        const zipPath = resolveStaticBinary(ZIP_FILENAME);
-        if (zipPath) {
-          const zipBytes = fs.readFileSync(zipPath);
-          await ghFetch(
-            `${uploadBase}?name=${encodeURIComponent(ZIP_FILENAME)}`,
-            token,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/zip',
-                'Content-Length': String(zipBytes.byteLength),
-              },
-              body: zipBytes,
-            }
-          );
-        }
-      }
+        activePollTimer = setTimeout(pollOnce, pollIntervalMs);
+      };
 
-      res.json({
-        ok: true,
-        repoUrl: repoInfo.html_url,
-        releaseUrl,
-        filesCount: treeEntries.length,
-      });
-    } catch (err) {
-      res.status(500).json({
-        error:
-          err instanceof Error
-            ? err.message
-            : 'שגיאה בלתי צפויה בהעלאת הפרויקט ל-GitHub',
-      });
+      activePollTimer = setTimeout(pollOnce, pollIntervalMs);
+      res.json(deviceSession);
+    } catch {
+      res.status(500).json({ error: 'שגיאה ביצירת חיבור מול GitHub' });
     }
+  });
+
+  // Also keep /api/github/status for compatibility
+  app.get('/api/github/status', (_req, res) => {
+    res.json({
+      connected: Boolean(connectedGithubToken || process.env.GITHUB_TOKEN?.trim()),
+      username: deviceSession.username,
+      deviceSession,
+    });
   });
 
   if (process.env.NODE_ENV !== 'production') {
