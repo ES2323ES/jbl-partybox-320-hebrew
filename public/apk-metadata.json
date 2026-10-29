@@ -1,0 +1,16 @@
+{
+  "fileName": "JBL-PartyBox-320-HE.apk",
+  "zipFileName": "JBL-PartyBox-320-HE-APK.zip",
+  "packageName": "com.jblpartybox320.hebrewcontrol",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minSdk": 24,
+  "targetSdk": 34,
+  "sizeBytes": 1746544,
+  "sizeFormatted": "1.67 MB",
+  "sha256": "8d7b3df67aaa6dca5c2e14eabe124a2508412453659669547597a416f018b2a2",
+  "zipSizeBytes": 1725992,
+  "zipSizeFormatted": "1.65 MB",
+  "zipSha256": "6b7586b1ac542afda2f5d19a934efa5d6a5d60a3dc8d6e8bf0e705f331d5f03b",
+  "builtAt": "2026-10-29"
+}

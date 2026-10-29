@@ -1,0 +1,37 @@
+name: Build & Verify JBL PartyBox 320 App
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build production web bundle
+        run: npm run build
+
+      - name: Upload Signed Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JBL-PartyBox-320-HE-APK
+          path: |
+            public/JBL-PartyBox-320-HE.apk
+            public/JBL-PartyBox-320-HE-APK.zip

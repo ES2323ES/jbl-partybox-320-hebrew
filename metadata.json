@@ -1,0 +1,6 @@
+{
+  "name": "JBL PartyBox 320 — מרכז שליטה",
+  "description": "אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 עם שליטה מלאה בתאורת מופע רב-אזורית, איקוולייזר 7 ערוצים בזמן אמת, הדגשת בס ואפקטי מסיבה.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
