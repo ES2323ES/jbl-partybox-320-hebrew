@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Plus, RotateCcw, Sliders, Trash2, Zap } from 'lucide-react';
+import {
+  Check,
+  Download,
+  Loader2,
+  Mic,
+  Plus,
+  RotateCcw,
+  Sliders,
+  Trash2,
+  Upload,
+  Zap,
+} from 'lucide-react';
 import {
   AcousticEnvironment,
   BUILTIN_EQ_PRESETS,
@@ -18,6 +29,7 @@ interface EqualizerPanelProps {
   playtimeBoost: boolean;
   savedProfiles: SavedEqProfile[];
   onChangeBandGain: (index: number, db: number) => void;
+  onApplyCalibratedGains: (gains: number[], env: AcousticEnvironment) => void;
   onSelectPreset: (preset: Exclude<EqPresetId, EqPresetId.Custom>) => void;
   onResetFlat: () => void;
   onChangeBassBoost: (mode: BassBoostMode) => void;
@@ -26,6 +38,8 @@ interface EqualizerPanelProps {
   onSaveProfile: (name: string) => void;
   onApplySavedProfile: (profile: SavedEqProfile) => void;
   onDeleteSavedProfile: (id: string) => void;
+  onExportFullBackup: () => void;
+  onImportFullBackupFile: (file: File) => Promise<string>;
 }
 
 const INDOOR_IMAGE_SRC = indoorImgUrl;
@@ -36,6 +50,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   playtimeBoost,
   savedProfiles,
   onChangeBandGain,
+  onApplyCalibratedGains,
   onSelectPreset,
   onResetFlat,
   onChangeBassBoost,
@@ -44,6 +59,8 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   onSaveProfile,
   onApplySavedProfile,
   onDeleteSavedProfile,
+  onExportFullBackup,
+  onImportFullBackupFile,
 }) => {
   const [spectrum, setSpectrum] = useState<number[]>(() => new Array(28).fill(0.05));
   const [newProfileName, setNewProfileName] = useState('');
@@ -52,6 +69,14 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   const [outdoorImgFailed, setOutdoorImgFailed] = useState(false);
   const [draggingBand, setDraggingBand] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Smart 5-Second Room Calibration State
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibPct, setCalibPct] = useState(0);
+  const [calibStage, setCalibStage] = useState('');
+  const [calibSummary, setCalibSummary] = useState<string | null>(null);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let raf: number | null = null;
@@ -123,7 +148,10 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   const linePath = useMemo(() => {
     if (curvePoints.length === 0) return '';
     return curvePoints
-      .map((pt, i) => `${i === 0 ? 'M' : 'L'} ${freqToX(pt.freq).toFixed(1)} ${dbToY(pt.db).toFixed(1)}`)
+      .map(
+        (pt, i) =>
+          `${i === 0 ? 'M' : 'L'} ${freqToX(pt.freq).toFixed(1)} ${dbToY(pt.db).toFixed(1)}`
+      )
       .join(' ');
   }, [curvePoints]);
 
@@ -144,6 +172,41 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
     setShowSaveInput(false);
   };
 
+  const handleRunSmartCalibration = async () => {
+    if (calibrating) return;
+    setCalibrating(true);
+    setCalibSummary(null);
+    try {
+      const res = await audioEngine.runAcousticRoomCalibration((pct, label) => {
+        setCalibPct(pct);
+        setCalibStage(label);
+      });
+      onApplyCalibratedGains(res.calibratedGains, res.detectedEnvironment);
+      setCalibSummary(res.summaryHe);
+    } catch {
+      setCalibSummary('לא ניתן היה להשלים את הכיול האקוסטי כעת.');
+    } finally {
+      setCalibrating(false);
+    }
+  };
+
+  const handleBackupFileSelected = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const msg = await onImportFullBackupFile(file);
+      setBackupNotice(msg);
+      window.setTimeout(() => setBackupNotice(null), 5000);
+    } catch (err) {
+      setBackupNotice(
+        err instanceof Error ? err.message : 'קובץ הגיבוי אינו תקין'
+      );
+    }
+  };
+
   const builtinKeys = Object.keys(BUILTIN_EQ_PRESETS) as Array<
     Exclude<EqPresetId, EqPresetId.Custom>
   >;
@@ -151,19 +214,40 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
   return (
     <div className="space-y-6">
       {/* Section 1: 7-Band Parametric/Graphic Equalizer & Real-time Spectrum */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-white">
               איקוולייזר 7 ערוצים ומנתח תדרים חי
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              כוונן כל תדר בטווח <span dir="ltr" className="font-mono tabular-nums">-12dB</span> עד{' '}
-              <span dir="ltr" className="font-mono tabular-nums">+12dB</span> ישירות על הגרף או באמצעות הזחלנים.
+              כוונן כל תדר בטווח{' '}
+              <span dir="ltr" className="font-mono tabular-nums">
+                -12dB
+              </span>{' '}
+              עד{' '}
+              <span dir="ltr" className="font-mono tabular-nums">
+                +12dB
+              </span>{' '}
+              ישירות על הגרף או הפעל כיול חדר אוטומטי.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={calibrating}
+              onClick={handleRunSmartCalibration}
+              className="flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[#D95B2B]/50 bg-[#D95B2B]/10 px-3.5 py-2 text-xs font-semibold text-[#B84318] transition-colors hover:bg-[#D95B2B]/15 dark:text-amber-200 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {calibrating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#D95B2B]" />
+              ) : (
+                <Mic className="h-3.5 w-3.5 text-[#D95B2B]" />
+              )}
+              <span>{calibrating ? `מכייל חלל... ${calibPct}%` : 'כיול אקוסטי חכם (5 ש׳)'}</span>
+            </button>
+
             <button
               type="button"
               onClick={onResetFlat}
@@ -179,10 +263,43 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               className="flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#D95B2B] px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#C24E22] whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="h-3.5 w-3.5" />
-              <span>שמור פרופיל אישי</span>
+              <span>שמור פרופיל</span>
             </button>
           </div>
         </div>
+
+        {/* Smart Acoustic Calibration Progress / Result Banner */}
+        {(calibrating || calibSummary) && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3.5 text-xs dark:border-slate-700 dark:bg-[#141B27]">
+            {calibrating ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between font-medium text-slate-800 dark:text-slate-200">
+                  <span>{calibStage}</span>
+                  <span className="font-mono tabular-nums" dir="ltr">
+                    {calibPct}%
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                  <div
+                    className="h-full rounded-full bg-[#D95B2B] transition-all duration-150"
+                    style={{ width: `${calibPct}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-2 text-teal-700 dark:text-teal-300">
+                <span>{calibSummary}</span>
+                <button
+                  type="button"
+                  onClick={() => setCalibSummary(null)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  סגור
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Inline Save Custom Preset Drawer */}
         {showSaveInput && (
@@ -259,7 +376,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               </linearGradient>
             </defs>
 
-            {/* Horizontal dB Grid Lines */}
             {[-12, -6, 0, 6, 12].map((dbVal) => {
               const y = dbToY(dbVal);
               return (
@@ -287,7 +403,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               );
             })}
 
-            {/* Live 28-Bar FFT Spectrum Analyzer Behind Curve */}
             {spectrum.map((val, i) => {
               const barW = innerW / spectrum.length - 3;
               const x = PAD_X + i * (innerW / spectrum.length) + 1.5;
@@ -307,7 +422,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               );
             })}
 
-            {/* Vertical EQ Band Guidelines */}
             {EQ_BANDS.map((band) => {
               const x = freqToX(band.freq);
               return (
@@ -334,7 +448,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               );
             })}
 
-            {/* Composite Response Curve Area & Stroke */}
             <path d={areaPath} fill="url(#eqAreaFill)" />
             <path
               d={linePath}
@@ -345,7 +458,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
               strokeLinejoin="round"
             />
 
-            {/* Draggable 7-Band Handle Nodes */}
             {EQ_BANDS.map((band, idx) => {
               const x = freqToX(band.freq);
               const gain = eq.gains[idx] ?? 0;
@@ -425,21 +537,55 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
           })}
         </div>
 
-        {/* User Saved Custom EQ Profiles */}
+        {/* User Saved Custom EQ Profiles + Full Backup Export / Import */}
         <div className="mt-6 border-t border-slate-200/80 pt-5 dark:border-slate-700/60">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-              פרופילי איקוולייזר שמורים במכשיר
-            </h3>
-            <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              {savedProfiles.length} פרופילים
-            </span>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
+                פרופילים אישיים וגיבוי הגדרות מלא
+              </h3>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                {savedProfiles.length} פרופילים שמורים במכשיר
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={backupInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleBackupFileSelected}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={onExportFullBackup}
+                className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 cursor-pointer whitespace-nowrap"
+              >
+                <Download className="h-3.5 w-3.5 text-[#D95B2B]" />
+                <span>ייצוא גיבוי מלא</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => backupInputRef.current?.click()}
+                className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 cursor-pointer whitespace-nowrap"
+              >
+                <Upload className="h-3.5 w-3.5 text-[#D95B2B]" />
+                <span>ייבוא גיבוי</span>
+              </button>
+            </div>
           </div>
+
+          {backupNotice && (
+            <div className="mb-3 rounded-xl border border-teal-500/35 bg-teal-50/70 px-3.5 py-2 text-xs text-teal-800 dark:bg-teal-950/30 dark:text-teal-300">
+              {backupNotice}
+            </div>
+          )}
 
           {savedProfiles.length === 0 ? (
             <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 dark:border-slate-700 dark:bg-[#141B27] sm:flex-row sm:items-center">
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                עדיין לא נשמרו פרופילי סאונד אישיים. כוונן את תדרי ה-EQ ולחץ על ״שמור פרופיל אישי״ כדי לעבור ביניהם בלחיצה.
+                עדיין לא נשמרו פרופילי סאונד אישיים. כוונן את תדרי ה-EQ ולחץ על ״שמור פרופיל״ כדי לעבור ביניהם בלחיצה.
               </p>
               <button
                 type="button"
@@ -487,7 +633,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
       </section>
 
       {/* Section 2: JBL BassBoost & AI Sound Boost */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
@@ -548,7 +694,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
           })}
         </div>
 
-        {/* AI Sound Boost DSP Compressor Toggle */}
         <div className="mt-5 flex flex-col gap-4 border-t border-slate-200/80 pt-5 dark:border-slate-700/60 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="flex items-center gap-2 text-sm font-medium text-slate-900 dark:text-white">
@@ -576,7 +721,7 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
       </section>
 
       {/* Section 3: Acoustic Placement Environment Calibration */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
           כיול אקוסטי לפי סביבת הצבה
         </h3>
@@ -585,7 +730,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
         </p>
 
         <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {/* Indoor Card */}
           <button
             type="button"
             onClick={() => onChangeEnvironment(AcousticEnvironment.Indoor)}
@@ -622,7 +766,6 @@ export const EqualizerPanel: React.FC<EqualizerPanelProps> = ({
             </div>
           </button>
 
-          {/* Outdoor Card */}
           <button
             type="button"
             onClick={() => onChangeEnvironment(AcousticEnvironment.Outdoor)}

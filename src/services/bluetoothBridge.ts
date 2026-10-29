@@ -1,4 +1,4 @@
-import { BassBoostMode } from '../types/speaker';
+import { APP_VERSION, BassBoostMode } from '../types/speaker';
 
 export interface PairedBluetoothDevice {
   name: string;
@@ -13,7 +13,27 @@ export interface SpeakerPermissionState {
   bluetoothScan: boolean;
   location: boolean;
   microphone: boolean;
+  notifications: boolean;
   bluetoothEnabled: boolean;
+}
+
+export type QuickNotificationAction =
+  | 'toggle_play'
+  | 'toggle_light'
+  | 'neon_mode'
+  | 'cycle_bass'
+  | 'toggle_mute';
+
+export interface GithubUpdateCheckResult {
+  checkedAt: string;
+  tagName: string;
+  releaseName: string;
+  publishedAt: string;
+  htmlUrl: string;
+  apkDownloadUrl: string | null;
+  zipDownloadUrl: string | null;
+  remoteVersion: string;
+  hasNewerVersion: boolean;
 }
 
 interface NativeJblAndroidBridge {
@@ -24,12 +44,20 @@ interface NativeJblAndroidBridge {
   setHardwareVolume: (percent: number, muted: boolean) => void;
   getHardwareVolumePercent: () => number;
   setHardwareEqualizer: (gainsJson: string, bassStrengthPermille: number) => void;
+  showQuickControlNotification?: (
+    title: string,
+    subtitle: string,
+    isPlaying: boolean,
+    lightEnabled: boolean
+  ) => void;
+  cancelQuickControlNotification?: () => void;
 }
 
 declare global {
   interface Window {
     JblAndroidBridge?: NativeJblAndroidBridge;
     onJblPermissionsUpdated?: (statusJson: string) => void;
+    onJblNotificationAction?: (action: string) => void;
   }
 }
 
@@ -65,9 +93,22 @@ interface NavigatorWithWebBluetooth extends Navigator {
   };
 }
 
+function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 class BluetoothSpeakerBridge {
   private activeBleDevice: WebBluetoothDevice | null = null;
   private permissionListeners = new Set<(state: SpeakerPermissionState) => void>();
+  private notificationActionListeners = new Set<
+    (action: QuickNotificationAction) => void
+  >();
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -78,6 +119,21 @@ class BluetoothSpeakerBridge {
           this.permissionListeners.forEach((cb) => cb(normalized));
         } catch {
           // ignore malformed bridge payload
+        }
+      };
+
+      window.onJblNotificationAction = (rawAction: string) => {
+        const validActions: QuickNotificationAction[] = [
+          'toggle_play',
+          'toggle_light',
+          'neon_mode',
+          'cycle_bass',
+          'toggle_mute',
+        ];
+        if (validActions.includes(rawAction as QuickNotificationAction)) {
+          this.notificationActionListeners.forEach((cb) =>
+            cb(rawAction as QuickNotificationAction)
+          );
         }
       };
     }
@@ -96,6 +152,7 @@ class BluetoothSpeakerBridge {
       bluetoothScan: Boolean(raw.bluetoothScan),
       location: Boolean(raw.location),
       microphone: Boolean(raw.microphone),
+      notifications: raw.notifications ?? true,
       bluetoothEnabled: raw.bluetoothEnabled ?? true,
     };
   }
@@ -115,12 +172,16 @@ class BluetoothSpeakerBridge {
     const hasWebBt =
       typeof navigator !== 'undefined' &&
       Boolean((navigator as NavigatorWithWebBluetooth).bluetooth);
+    const notifGranted =
+      typeof Notification !== 'undefined' ? Notification.permission === 'granted' : true;
+
     return {
       isAndroidApk: false,
       bluetoothConnect: hasWebBt,
       bluetoothScan: hasWebBt,
       location: true,
       microphone: typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices),
+      notifications: notifGranted,
       bluetoothEnabled: true,
     };
   }
@@ -132,6 +193,71 @@ class BluetoothSpeakerBridge {
     return () => {
       this.permissionListeners.delete(listener);
     };
+  }
+
+  public onQuickNotificationAction(
+    listener: (action: QuickNotificationAction) => void
+  ): () => void {
+    this.notificationActionListeners.add(listener);
+    return () => {
+      this.notificationActionListeners.delete(listener);
+    };
+  }
+
+  public syncQuickControlNotification(options: {
+    enabled: boolean;
+    speakerName: string;
+    presetTitle: string;
+    volume: number;
+    isPlaying: boolean;
+    lightEnabled: boolean;
+    onPrevTrack?: () => void;
+    onNextTrack?: () => void;
+    onTogglePlay?: () => void;
+  }): void {
+    // 1. Native Android Notification Shade Controls
+    if (this.isAndroidNativeBridgeAvailable() && window.JblAndroidBridge) {
+      try {
+        if (options.enabled) {
+          window.JblAndroidBridge.showQuickControlNotification?.(
+            options.speakerName,
+            `עוצמה ${options.volume}% · תאורה: ${options.lightEnabled ? options.presetTitle : 'כבויה'}`,
+            options.isPlaying,
+            options.lightEnabled
+          );
+        } else {
+          window.JblAndroidBridge.cancelQuickControlNotification?.();
+        }
+      } catch {
+        // ignore native notification error
+      }
+    }
+
+    // 2. Lock Screen & Media Shade via MediaSession API (works in Android Chrome, PWA & WebView)
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        if (options.enabled && typeof MediaMetadata !== 'undefined') {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: options.speakerName,
+            artist: `JBL PartyBox 320 · עוצמה ${options.volume}%`,
+            album: `תאורה: ${options.lightEnabled ? options.presetTitle : 'כבויה'}`,
+          });
+          navigator.mediaSession.playbackState = options.isPlaying ? 'playing' : 'paused';
+          if (options.onTogglePlay) {
+            navigator.mediaSession.setActionHandler('play', options.onTogglePlay);
+            navigator.mediaSession.setActionHandler('pause', options.onTogglePlay);
+          }
+          if (options.onPrevTrack) {
+            navigator.mediaSession.setActionHandler('previoustrack', options.onPrevTrack);
+          }
+          if (options.onNextTrack) {
+            navigator.mediaSession.setActionHandler('nexttrack', options.onNextTrack);
+          }
+        }
+      } catch {
+        // ignore unsupported mediaSession actions
+      }
+    }
   }
 
   public async requestAllSpeakerPermissions(): Promise<{
@@ -147,13 +273,12 @@ class BluetoothSpeakerBridge {
         granted: st.bluetoothConnect && st.bluetoothScan,
         message:
           st.bluetoothConnect && st.bluetoothScan
-            ? 'כל הרשאות ה-Bluetooth, השמע והמיקרופון מאושרות ופעילות באנדרואיד.'
-            : 'נפתחה בקשת הרשאות מערכת באנדרואיד — אשר גישה ל״מכשירים קרובים״ ולמיקרופון לחיבור מלא לרמקול.',
+            ? 'כל הרשאות הבלוטוס, ההתראות, השמע והמיקרופון מאושרות ופעילות באנדרואיד.'
+            : 'נפתחה בקשת הרשאות מערכת באנדרואיד — אשר גישה למכשירים קרובים, התראות ומיקרופון.',
         state: st,
       };
     }
 
-    // Web browser flow: request microphone/audio device enumeration permission if available
     let micOk = false;
     if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
       try {
@@ -165,14 +290,25 @@ class BluetoothSpeakerBridge {
       }
     }
 
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch {
+        // ignore
+      }
+    }
+
     const st = this.getPermissionState();
-    const updated: SpeakerPermissionState = { ...st, microphone: micOk || st.microphone };
+    const updated: SpeakerPermissionState = {
+      ...st,
+      microphone: micOk || st.microphone,
+    };
     this.permissionListeners.forEach((cb) => cb(updated));
     return {
       granted: true,
       message: micOk
-        ? 'הרשאות שמע ומיקרופון אושרו בדפדפן. כעת ניתן לסרוק רמקול JBL ב-Bluetooth או להזרים שמע.'
-        : 'הדפדפן מוכן להזרמת שמע ל-Bluetooth של המכשיר (גישת מיקרופון לא אושרה).',
+        ? 'הרשאות שמע ומיקרופון אושרו בדפדפן. כעת ניתן להפעיל קריוקי חי, כיול אקוסטי וסריקת רמקול.'
+        : 'הדפדפן מוכן להזרמת שמע לבלוטוס של המכשיר (גישת מיקרופון לא אושרה).',
       state: updated,
     };
   }
@@ -229,7 +365,7 @@ class BluetoothSpeakerBridge {
             ok: true,
             deviceName: jblSpeaker.name,
             batteryLevel: null,
-            message: `מחובר להתקן האודיו "${jblSpeaker.name}" דרך גשר ה-Bluetooth של אנדרואיד.`,
+            message: `מחובר אוטומטית להתקן האודיו "${jblSpeaker.name}" דרך גשר ה-Bluetooth של אנדרואיד.`,
           };
         }
         return {
@@ -290,7 +426,7 @@ class BluetoothSpeakerBridge {
           const val = await batteryChar.readValue();
           batteryLevel = val.getUint8(0);
         } catch {
-          // Many speakers expose proprietary GATT characteristics without standard 0x180F
+          // Proprietary speaker GATT fallback
         }
       }
 
@@ -379,6 +515,54 @@ class BluetoothSpeakerBridge {
     } catch {
       return [];
     }
+  }
+
+  public async checkGithubLatestRelease(
+    repoSlug = 'ES2323ES/jbl-partybox-320-hebrew'
+  ): Promise<GithubUpdateCheckResult> {
+    const res = await fetch(`https://api.github.com/repos/${repoSlug}/releases/latest`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`לא ניתן לבדוק עדכונים כעת (HTTP ${res.status})`);
+    }
+    const data = (await res.json()) as {
+      tag_name?: string;
+      name?: string;
+      published_at?: string;
+      html_url?: string;
+      body?: string;
+      assets?: Array<{ name?: string; browser_download_url?: string }>;
+    };
+
+    const tagName = data.tag_name || 'v1';
+    const releaseName = data.name || tagName;
+    const versionMatch =
+      /(\d+\.\d+\.\d+)/.exec(releaseName) ||
+      /(\d+\.\d+\.\d+)/.exec(data.body || '') ||
+      /(\d+\.\d+\.\d+)/.exec(tagName);
+    const remoteVersion = versionMatch ? versionMatch[1] : APP_VERSION;
+
+    const assets = Array.isArray(data.assets) ? data.assets : [];
+    const apkAsset = assets.find((a) => (a.name || '').endsWith('.apk'));
+    const zipAsset = assets.find((a) => (a.name || '').endsWith('.zip'));
+
+    return {
+      checkedAt: new Date().toLocaleTimeString('he-IL', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      tagName,
+      releaseName,
+      publishedAt: (data.published_at || '').slice(0, 10),
+      htmlUrl: data.html_url || `https://github.com/${repoSlug}/releases`,
+      apkDownloadUrl: apkAsset?.browser_download_url || null,
+      zipDownloadUrl: zipAsset?.browser_download_url || null,
+      remoteVersion,
+      hasNewerVersion: compareSemver(remoteVersion, APP_VERSION) > 0,
+    };
   }
 }
 

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bluetooth,
   Disc3,
@@ -11,25 +11,31 @@ import {
   LayoutGrid,
   Moon,
   Sliders,
+  Sparkles,
   Sun,
   WifiOff,
 } from 'lucide-react';
 import {
   APP_VERSION,
   AcousticEnvironment,
+  AppVisualTheme,
   AuracastMode,
   BUILTIN_EQ_PRESETS,
   BassBoostMode,
+  CustomSamplerSlot,
   DemoGrooveId,
   DjPadEffectId,
   EqPresetId,
   EqualizerState,
+  FullBackupBundle,
   LIGHTSHOW_PRESETS,
   LightZoneKey,
   LightshowPresetId,
   LightshowState,
   MicGuitarState,
   NavTab,
+  PartySceneDefinition,
+  PartySceneId,
   SavedEqProfile,
   SpeakerSystemState,
 } from './types/speaker';
@@ -51,7 +57,8 @@ import {
 
 const STORAGE_KEY_STATE = 'jbl_pb320_he_state_v1';
 const STORAGE_KEY_PROFILES = 'jbl_pb320_he_profiles_v1';
-const STORAGE_KEY_THEME = 'jbl_pb320_theme_v2';
+const STORAGE_KEY_THEME = 'jbl_pb320_theme_v3';
+const STORAGE_KEY_SAMPLES = 'jbl_pb320_samples_v1';
 
 const DEFAULT_LIGHTSHOW: LightshowState = {
   enabled: true,
@@ -90,6 +97,7 @@ const DEFAULT_MIC_GUITAR: MicGuitarState = {
   channel2Volume: 60,
   channel2Gain: 50,
   vocalDucking: false,
+  liveKaraokeActive: false,
 };
 
 const DEFAULT_SYSTEM: SpeakerSystemState = {
@@ -102,6 +110,8 @@ const DEFAULT_SYSTEM: SpeakerSystemState = {
   playtimeBoost: false,
   auracastMode: AuracastMode.Single,
   stereoChannel: 'R',
+  autoReconnect: true,
+  notificationControlsEnabled: true,
 };
 
 const INITIAL_SAVED_PROFILES: SavedEqProfile[] = [
@@ -119,36 +129,53 @@ const INITIAL_SAVED_PROFILES: SavedEqProfile[] = [
   },
 ];
 
+const INITIAL_SAMPLER_SLOTS: CustomSamplerSlot[] = [
+  { slotIndex: 0, label: 'קריאת מסיבה 1', audioDataUrl: null, durationSec: 0 },
+  { slotIndex: 1, label: 'קריאת מסיבה 2', audioDataUrl: null, durationSec: 0 },
+  { slotIndex: 2, label: 'קריאת מסיבה 3', audioDataUrl: null, durationSec: 0 },
+  { slotIndex: 3, label: 'קריאת מסיבה 4', audioDataUrl: null, durationSec: 0 },
+];
+
 export default function App() {
   const { isNativeApk, isInstalled, isInstallable, install } = usePWAInstall();
   const [activeTab, setActiveTab] = useState<NavTab>(NavTab.Overview);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [heroDownloading, setHeroDownloading] = useState(false);
   const [heroDownloadDone, setHeroDownloadDone] = useState(false);
+  const [activeSceneId, setActiveSceneId] = useState<PartySceneId | null>(null);
+  const [sleepRemainingSec, setSleepRemainingSec] = useState<number | null>(null);
+  const sleepStartVolRef = useRef<number>(72);
   const isOnline = useOnlineStatus();
 
-  // Eye-Comfort Theme (Default: Soft Daylight Studio; Optional: Soft Evening Slate)
-  const [isDarkTheme, setIsDarkTheme] = useState<boolean>(() => {
+  // 3-Mode Display Lighting Theme: 'light' | 'dark' | 'neon'
+  const [themeMode, setThemeMode] = useState<AppVisualTheme>(() => {
     try {
-      return localStorage.getItem(STORAGE_KEY_THEME) === 'dark';
+      const saved = localStorage.getItem(STORAGE_KEY_THEME);
+      if (saved === 'light' || saved === 'dark' || saved === 'neon') {
+        return saved;
+      }
     } catch {
-      return false;
+      // ignore
     }
+    return 'light';
   });
 
   useEffect(() => {
     const root = document.documentElement;
-    if (isDarkTheme) {
+    if (themeMode === 'dark') {
       root.classList.add('dark');
+      root.classList.remove('theme-neon');
+    } else if (themeMode === 'neon') {
+      root.classList.add('dark', 'theme-neon');
     } else {
-      root.classList.remove('dark');
+      root.classList.remove('dark', 'theme-neon');
     }
     try {
-      localStorage.setItem(STORAGE_KEY_THEME, isDarkTheme ? 'dark' : 'light');
+      localStorage.setItem(STORAGE_KEY_THEME, themeMode);
     } catch {
       // ignore
     }
-  }, [isDarkTheme]);
+  }, [themeMode]);
 
   // Persisted Hardware States
   const [lightshow, setLightshow] = useState<LightshowState>(() => {
@@ -156,7 +183,16 @@ export default function App() {
       const raw = localStorage.getItem(STORAGE_KEY_STATE);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed.lightshow) return { ...DEFAULT_LIGHTSHOW, ...parsed.lightshow };
+        if (parsed.lightshow) {
+          const presetValid = Object.values(LightshowPresetId).includes(
+            parsed.lightshow.preset
+          );
+          return {
+            ...DEFAULT_LIGHTSHOW,
+            ...parsed.lightshow,
+            preset: presetValid ? parsed.lightshow.preset : LightshowPresetId.Flow,
+          };
+        }
       }
     } catch {
       // ignore
@@ -182,7 +218,13 @@ export default function App() {
       const raw = localStorage.getItem(STORAGE_KEY_STATE);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed.micGuitar) return { ...DEFAULT_MIC_GUITAR, ...parsed.micGuitar };
+        if (parsed.micGuitar) {
+          return {
+            ...DEFAULT_MIC_GUITAR,
+            ...parsed.micGuitar,
+            liveKaraokeActive: false,
+          };
+        }
       }
     } catch {
       // ignore
@@ -216,22 +258,18 @@ export default function App() {
     return INITIAL_SAVED_PROFILES;
   });
 
-  // Auto-detect paired JBL Bluetooth speaker when running inside native Android APK
-  useEffect(() => {
-    if (!bluetoothBridge.isAndroidNativeBridgeAvailable()) return;
-    const paired = bluetoothBridge.getPairedAndroidSpeakers();
-    const activeJbl =
-      paired.find((d) => d.isJbl && d.isActiveAudioRoute) ||
-      paired.find((d) => d.isJbl);
-    if (activeJbl) {
-      setSystem((prev) => ({
-        ...prev,
-        connectionType: 'android_bt',
-        bleDeviceTitle: activeJbl.name,
-        deviceName: activeJbl.name,
-      }));
+  const [customSamples, setCustomSamples] = useState<CustomSamplerSlot[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_SAMPLES);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length === 4) return parsed;
+      }
+    } catch {
+      // ignore
     }
-  }, []);
+    return INITIAL_SAMPLER_SLOTS;
+  });
 
   // Live Audio Source Transport State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -240,12 +278,43 @@ export default function App() {
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
 
-  // Sync state to localStorage
+  // Auto-detect paired JBL Bluetooth speaker on launch & resume when autoReconnect is active
+  useEffect(() => {
+    if (!system.autoReconnect) return;
+
+    const tryAutoConnect = () => {
+      if (!bluetoothBridge.isAndroidNativeBridgeAvailable()) return;
+      const paired = bluetoothBridge.getPairedAndroidSpeakers();
+      const activeJbl =
+        paired.find((d) => d.isJbl && d.isActiveAudioRoute) ||
+        paired.find((d) => d.isJbl);
+      if (activeJbl) {
+        setSystem((prev) => ({
+          ...prev,
+          connectionType: 'android_bt',
+          bleDeviceTitle: activeJbl.name,
+          deviceName: activeJbl.name,
+        }));
+      }
+    };
+
+    tryAutoConnect();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        tryAutoConnect();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [system.autoReconnect]);
+
+  // Persist States
   useEffect(() => {
     try {
+      const { liveKaraokeActive: _ignoreLive, ...persistedMic } = micGuitar;
       localStorage.setItem(
         STORAGE_KEY_STATE,
-        JSON.stringify({ lightshow, eq, micGuitar, system })
+        JSON.stringify({ lightshow, eq, micGuitar: persistedMic, system })
       );
     } catch {
       // ignore quota errors
@@ -259,6 +328,14 @@ export default function App() {
       // ignore
     }
   }, [savedProfiles]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_SAMPLES, JSON.stringify(customSamples));
+    } catch {
+      // ignore quota errors
+    }
+  }, [customSamples]);
 
   // Sync DSP Engine + Hardware Bridge on every parameter change
   useEffect(() => {
@@ -282,9 +359,58 @@ export default function App() {
   }, [system.playtimeBoost]);
 
   useEffect(() => {
-    const duckFactor = micGuitar.vocalDucking ? 0.65 : 1;
+    const duckFactor =
+      micGuitar.vocalDucking && !micGuitar.liveKaraokeActive ? 0.72 : 1;
     audioEngine.setVolume(Math.round(system.volume * duckFactor), system.muted);
-  }, [system.volume, system.muted, micGuitar.vocalDucking]);
+  }, [
+    system.volume,
+    system.muted,
+    micGuitar.vocalDucking,
+    micGuitar.liveKaraokeActive,
+  ]);
+
+  useEffect(() => {
+    audioEngine.updateLiveKaraokeParams({
+      volume: micGuitar.mic1Volume,
+      bassDb: micGuitar.mic1Bass,
+      trebleDb: micGuitar.mic1Treble,
+      echoPercent: micGuitar.mic1Echo,
+      vocalDucking: micGuitar.vocalDucking,
+    });
+  }, [
+    micGuitar.mic1Volume,
+    micGuitar.mic1Bass,
+    micGuitar.mic1Treble,
+    micGuitar.mic1Echo,
+    micGuitar.vocalDucking,
+  ]);
+
+  // Gradual Sleep & Fade-Out Timer
+  useEffect(() => {
+    if (sleepRemainingSec === null) return;
+    if (sleepRemainingSec <= 0) {
+      audioEngine.pause();
+      setIsPlaying(false);
+      setSystem((prev) => ({ ...prev, muted: true }));
+      setLightshow((prev) => ({ ...prev, enabled: false }));
+      setSleepRemainingSec(null);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const nextSec = sleepRemainingSec - 1;
+      if (nextSec > 0 && nextSec <= 60) {
+        const scaledVol = Math.max(
+          4,
+          Math.round(sleepStartVolRef.current * (nextSec / 60))
+        );
+        setSystem((prev) => ({ ...prev, volume: scaledVol }));
+      }
+      setSleepRemainingSec(nextSec);
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [sleepRemainingSec]);
 
   // --- Audio Transport Handlers ---
 
@@ -304,15 +430,15 @@ export default function App() {
     setIsPlaying(true);
   }, []);
 
-  const handleUploadFile = useCallback(async (file: File) => {
+  const handleUploadFiles = useCallback(async (files: File[]) => {
     setMicError(null);
     try {
-      const name = await audioEngine.loadAudioFile(file);
+      const name = await audioEngine.loadAudioFiles(files);
       setUploadedFileName(name);
       setSourceMode('file');
       setIsPlaying(true);
     } catch {
-      setMicError('לא ניתן היה לטעון את קובץ השמע שנבחר.');
+      setMicError('לא ניתן היה לטעון את קובצי השמע שנבחרו.');
     }
   }, []);
 
@@ -329,18 +455,22 @@ export default function App() {
       setSourceMode('mic');
       setIsPlaying(true);
     } else {
-      setMicError('הגישה למיקרופון נדחתה או אינה זמינה — ניתן לנגן מקצב מובנה או להעלות שיר.');
+      setMicError(
+        'הגישה למיקרופון נדחתה או אינה זמינה — ניתן לנגן מקצב מובנה או לטעון שירים מהמכשיר.'
+      );
     }
   }, [sourceMode, isPlaying]);
 
-  // --- Lightshow Handlers ---
+  // --- Lightshow & Neon Handlers ---
 
   const handleUpdateLightshow = useCallback((patch: Partial<LightshowState>) => {
+    setActiveSceneId(null);
     setLightshow((prev) => ({ ...prev, ...patch }));
   }, []);
 
   const handleSelectLightPreset = useCallback(
     (preset: LightshowPresetId, applyDefaultColors = true) => {
+      setActiveSceneId(null);
       const meta = LIGHTSHOW_PRESETS[preset];
       setLightshow((prev) => ({
         ...prev,
@@ -356,6 +486,18 @@ export default function App() {
     },
     []
   );
+
+  const handleActivateNeonLightshow = useCallback(() => {
+    setThemeMode('neon');
+    setLightshow((prev) => ({
+      ...prev,
+      enabled: true,
+      preset: LightshowPresetId.Neon,
+      primaryColor: '#00F0FF',
+      secondaryColor: '#E838FF',
+      brightness: Math.max(85, prev.brightness),
+    }));
+  }, []);
 
   const handleToggleZone = useCallback((zone: LightZoneKey) => {
     setLightshow((prev) => ({
@@ -381,9 +523,10 @@ export default function App() {
     }));
   }, []);
 
-  // --- Equalizer Handlers ---
+  // --- Equalizer & Smart Scene Handlers ---
 
   const handleChangeBandGain = useCallback((index: number, db: number) => {
+    setActiveSceneId(null);
     setEq((prev) => {
       const nextGains = [...prev.gains];
       nextGains[index] = db;
@@ -396,8 +539,23 @@ export default function App() {
     });
   }, []);
 
+  const handleApplyCalibratedGains = useCallback(
+    (gains: number[], environment: AcousticEnvironment) => {
+      setActiveSceneId(null);
+      setEq((prev) => ({
+        ...prev,
+        preset: EqPresetId.Custom,
+        activeCustomId: null,
+        gains: [...gains],
+        environment,
+      }));
+    },
+    []
+  );
+
   const handleSelectEqPreset = useCallback(
     (preset: Exclude<EqPresetId, EqPresetId.Custom>) => {
+      setActiveSceneId(null);
       setEq((prev) => ({
         ...prev,
         preset,
@@ -419,6 +577,94 @@ export default function App() {
       return { ...prev, bassBoost: next };
     });
   }, []);
+
+  const handleApplyPartyScene = useCallback((scene: PartySceneDefinition) => {
+    setActiveSceneId(scene.id);
+    if (scene.id === 'neon_club') {
+      setThemeMode('neon');
+    }
+    setLightshow((prev) => ({
+      ...prev,
+      enabled: true,
+      preset: scene.lightPreset,
+      primaryColor: scene.primaryColor,
+      secondaryColor: scene.secondaryColor,
+      brightness: scene.brightness,
+      strobeIntensity: scene.strobeIntensity,
+      zones: {
+        ...prev.zones,
+        rings: true,
+        starry: true,
+        sideRails: true,
+        strobeTop: !scene.disableStrobes,
+        strobeBottom: !scene.disableStrobes,
+      },
+    }));
+    setEq((prev) => ({
+      ...prev,
+      preset: EqPresetId.Custom,
+      activeCustomId: null,
+      gains: [...scene.gains],
+      bassBoost: scene.bassBoost,
+    }));
+    setSystem((prev) => ({
+      ...prev,
+      volume: scene.volume,
+      muted: false,
+    }));
+    if (typeof scene.vocalDucking === 'boolean' || typeof scene.echo === 'number') {
+      setMicGuitar((prev) => ({
+        ...prev,
+        ...(typeof scene.vocalDucking === 'boolean'
+          ? { vocalDucking: scene.vocalDucking }
+          : {}),
+        ...(typeof scene.echo === 'number' ? { mic1Echo: scene.echo } : {}),
+      }));
+    }
+  }, []);
+
+  // --- Sync Android Notification Shade & MediaSession ---
+
+  useEffect(() => {
+    bluetoothBridge.syncQuickControlNotification({
+      enabled: system.notificationControlsEnabled,
+      speakerName: system.deviceName,
+      presetTitle: LIGHTSHOW_PRESETS[lightshow.preset].title,
+      volume: system.muted ? 0 : system.volume,
+      isPlaying,
+      lightEnabled: lightshow.enabled,
+      onTogglePlay: handleTogglePlay,
+      onPrevTrack: () => audioEngine.prevTrack(),
+      onNextTrack: () => audioEngine.nextTrack(),
+    });
+  }, [
+    system.notificationControlsEnabled,
+    system.deviceName,
+    system.volume,
+    system.muted,
+    lightshow.preset,
+    lightshow.enabled,
+    isPlaying,
+    handleTogglePlay,
+  ]);
+
+  useEffect(() => {
+    return bluetoothBridge.onQuickNotificationAction((action) => {
+      if (action === 'toggle_play') {
+        handleTogglePlay();
+      } else if (action === 'toggle_light') {
+        setLightshow((prev) => ({ ...prev, enabled: !prev.enabled }));
+      } else if (action === 'neon_mode') {
+        handleActivateNeonLightshow();
+      } else if (action === 'cycle_bass') {
+        handleCycleBassBoost();
+      } else if (action === 'toggle_mute') {
+        setSystem((prev) => ({ ...prev, muted: !prev.muted }));
+      }
+    });
+  }, [handleTogglePlay, handleActivateNeonLightshow, handleCycleBassBoost]);
+
+  // --- Profiles, Custom Sampler & Full Backup Export / Import ---
 
   const handleSaveProfile = useCallback(
     (name: string) => {
@@ -455,6 +701,93 @@ export default function App() {
     );
   }, []);
 
+  const handleSaveCustomSample = useCallback(
+    (slotIndex: number, dataUrl: string, durationSec: number) => {
+      setCustomSamples((prev) =>
+        prev.map((s) =>
+          s.slotIndex === slotIndex
+            ? { ...s, audioDataUrl: dataUrl, durationSec }
+            : s
+        )
+      );
+    },
+    []
+  );
+
+  const handleClearCustomSample = useCallback((slotIndex: number) => {
+    setCustomSamples((prev) =>
+      prev.map((s) =>
+        s.slotIndex === slotIndex
+          ? { ...s, audioDataUrl: null, durationSec: 0 }
+          : s
+      )
+    );
+  }, []);
+
+  const handleExportFullBackup = useCallback(() => {
+    const bundle: FullBackupBundle = {
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      lightshow,
+      eq,
+      micGuitar: { ...micGuitar, liveKaraokeActive: false },
+      savedProfiles,
+      customSamples,
+    };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `JBL-PartyBox-320-Backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [lightshow, eq, micGuitar, savedProfiles, customSamples]);
+
+  const handleImportFullBackupFile = useCallback(
+    async (file: File): Promise<string> => {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Partial<FullBackupBundle>;
+      if (!parsed.eq || !Array.isArray(parsed.eq.gains)) {
+        throw new Error('קובץ הגיבוי שנבחר אינו מכיל נתוני הגדרות תקינים.');
+      }
+      if (parsed.lightshow) {
+        setLightshow({ ...DEFAULT_LIGHTSHOW, ...parsed.lightshow });
+      }
+      setEq({ ...DEFAULT_EQ, ...parsed.eq });
+      if (parsed.micGuitar) {
+        setMicGuitar({
+          ...DEFAULT_MIC_GUITAR,
+          ...parsed.micGuitar,
+          liveKaraokeActive: false,
+        });
+      }
+      if (Array.isArray(parsed.savedProfiles)) {
+        setSavedProfiles(parsed.savedProfiles);
+      }
+      if (Array.isArray(parsed.customSamples) && parsed.customSamples.length === 4) {
+        setCustomSamples(parsed.customSamples);
+      }
+      return 'כל פרופילי הסאונד, התאורה והסמפלים שוחזרו בהצלחה מקובץ הגיבוי!';
+    },
+    []
+  );
+
+  const handleStartSleepTimer = useCallback(
+    (minutes: number | null) => {
+      if (minutes === null) {
+        setSleepRemainingSec(null);
+        return;
+      }
+      sleepStartVolRef.current = system.volume;
+      setSleepRemainingSec(minutes * 60);
+    },
+    [system.volume]
+  );
+
   const handleTriggerDjEffect = useCallback((effect: DjPadEffectId) => {
     audioEngine.triggerDjEffect(effect);
   }, []);
@@ -468,7 +801,7 @@ export default function App() {
     { id: NavTab.Overview, label: 'סקירה כללית', shortLabel: 'ראשי', icon: LayoutGrid },
     { id: NavTab.Lightshow, label: 'תאורת מופע', shortLabel: 'תאורה', icon: Sun },
     { id: NavTab.Equalizer, label: 'איקוולייזר וסאונד', shortLabel: 'איקוולייזר', icon: Sliders },
-    { id: NavTab.PartyFx, label: 'אפקטים ומיקרופון', shortLabel: 'אפקטים', icon: Disc3 },
+    { id: NavTab.PartyFx, label: 'אפקטים וקריוקי', shortLabel: 'קריוקי', icon: Disc3 },
   ];
 
   const navItems = isNativeApk
@@ -483,11 +816,15 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen bg-[#F4F6FA] pb-24 text-slate-800 transition-colors duration-200 dark:bg-[#161D2B] dark:text-slate-100 md:pb-12"
+      className={`min-h-screen pb-24 text-slate-800 transition-colors duration-200 dark:text-slate-100 md:pb-12 ${
+        themeMode === 'neon'
+          ? 'bg-[#090D1A]'
+          : 'bg-[#F4F6FA] dark:bg-[#161D2B]'
+      }`}
       dir="rtl"
     >
       {/* Strict 3-Zone Top Bar Contract */}
-      <header className="border-b border-slate-200/90 bg-white/95 backdrop-blur-md transition-colors dark:border-slate-700/70 dark:bg-[#1A2233]/95">
+      <header className="neon-header border-b border-slate-200/90 bg-white/95 backdrop-blur-md transition-colors dark:border-slate-700/70 dark:bg-[#1A2233]/95">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 py-3.5 sm:px-6 lg:px-8">
           {/* Zone 1: Single-line Brand Wordmark */}
           <a
@@ -515,7 +852,9 @@ export default function App() {
                   onClick={() => setActiveTab(item.id)}
                   className={`py-1.5 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
                     active
-                      ? 'border-[#D95B2B] text-slate-900 dark:text-white font-semibold'
+                      ? themeMode === 'neon'
+                        ? 'border-cyan-400 text-white font-semibold'
+                        : 'border-[#D95B2B] text-slate-900 dark:text-white font-semibold'
                       : 'border-transparent text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
                   }`}
                 >
@@ -547,8 +886,8 @@ export default function App() {
 
       {/* Main Content Container */}
       <main id="top" className="mx-auto max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
-        {/* Contextual Workspace Intro + Eye-Comfort Theme Switch + Direct APK/ZIP Download */}
-        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        {/* Contextual Workspace Intro + 3-Mode Display Lighting Selector (Day / Evening / Neon!) + Download */}
+        <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 sm:text-3xl">
               {system.deviceName}
@@ -567,24 +906,51 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Eye-Comfort Theme Mode Toggle */}
-            <button
-              type="button"
-              onClick={() => setIsDarkTheme((prev) => !prev)}
-              className="flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+            {/* 3-Option Display & Lighting Mode Selector: Day | Soft Evening | Beautiful Neon */}
+            <div
+              role="group"
+              aria-label="בחירת תאורת תצוגה"
+              className="neon-surface flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 dark:border-slate-700 dark:bg-[#1E2738]"
             >
-              {isDarkTheme ? (
-                <>
-                  <Sun className="h-4 w-4 text-amber-400" />
-                  <span>תצוגת יום בהירה</span>
-                </>
-              ) : (
-                <>
-                  <Moon className="h-4 w-4 text-slate-600" />
-                  <span>תצוגת ערב רכה</span>
-                </>
-              )}
-            </button>
+              <button
+                type="button"
+                onClick={() => setThemeMode('light')}
+                className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  themeMode === 'light'
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white'
+                }`}
+              >
+                <Sun className="h-3.5 w-3.5 text-amber-400" />
+                <span>יום בהיר</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setThemeMode('dark')}
+                className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  themeMode === 'dark'
+                    ? 'bg-[#D95B2B] text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white'
+                }`}
+              >
+                <Moon className="h-3.5 w-3.5" />
+                <span>ערב רך</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleActivateNeonLightshow}
+                className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                  themeMode === 'neon'
+                    ? 'bg-gradient-to-l from-cyan-500 to-fuchsia-600 text-white shadow-[0_0_16px_rgba(0,240,255,0.45)]'
+                    : 'text-slate-600 hover:text-cyan-700 dark:text-slate-300 dark:hover:text-cyan-300'
+                }`}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>תאורת ניאון</span>
+              </button>
+            </div>
 
             {!isNativeApk && (
               <>
@@ -610,7 +976,7 @@ export default function App() {
                       ? 'מוריד ארכיון ZIP...'
                       : heroDownloadDone
                         ? `ירד בהצלחה (${ZIP_FILE_NAME})`
-                        : `הורדת APK / ZIP (גרסה ${APP_VERSION})`}
+                        : `הורדת APK / ZIP (${APP_VERSION})`}
                   </span>
                 </button>
 
@@ -618,7 +984,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={install}
-                    className="min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="neon-surface min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     התקנה מהירה למכשיר
                   </button>
@@ -632,7 +998,7 @@ export default function App() {
                           : NavTab.ApkDownload
                       )
                     }
-                    className="min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="neon-surface min-h-[44px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-[#1E2738] dark:text-slate-200 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {activeTab === NavTab.ApkDownload
                       ? 'חזרה למרכז השליטה'
@@ -644,7 +1010,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Real-Time Audio Source & Master Volume Strip */}
+        {/* Real-Time Audio Source, Multi-Track Playlist & Master Volume Strip */}
         <div className="mb-6">
           <AudioSourceBar
             isPlaying={isPlaying}
@@ -656,7 +1022,7 @@ export default function App() {
             micError={micError}
             onTogglePlay={handleTogglePlay}
             onSelectGroove={handleSelectGroove}
-            onUploadFile={handleUploadFile}
+            onUploadFiles={handleUploadFiles}
             onStartMicSync={handleStartMicSync}
             onChangeVolume={(vol) =>
               setSystem((prev) => ({ ...prev, volume: vol, muted: false }))
@@ -682,6 +1048,7 @@ export default function App() {
               onToggleLightshow={() =>
                 handleUpdateLightshow({ enabled: !lightshow.enabled })
               }
+              onActivateNeonLightshow={handleActivateNeonLightshow}
               onCycleBassBoost={handleCycleBassBoost}
               onTogglePlay={handleTogglePlay}
               onToggleMute={() =>
@@ -700,9 +1067,14 @@ export default function App() {
                 batteryPercent={system.batteryPercent}
                 playtimeBoost={system.playtimeBoost}
                 volume={system.volume}
+                activeSceneId={activeSceneId}
+                sleepRemainingSec={sleepRemainingSec}
+                notificationControlsEnabled={system.notificationControlsEnabled}
+                autoReconnect={system.autoReconnect}
                 onNavigate={setActiveTab}
-                onSelectLightPreset={(preset) =>
-                  handleSelectLightPreset(preset, false)
+                onApplyPartyScene={handleApplyPartyScene}
+                onSelectLightPreset={(preset, applyColors = false) =>
+                  handleSelectLightPreset(preset, applyColors)
                 }
                 onUpdateLightColors={(primaryColor, secondaryColor) =>
                   handleUpdateLightshow({
@@ -722,6 +1094,19 @@ export default function App() {
                   }))
                 }
                 onTriggerDjEffect={handleTriggerDjEffect}
+                onStartSleepTimer={handleStartSleepTimer}
+                onToggleNotificationControls={() =>
+                  setSystem((prev) => ({
+                    ...prev,
+                    notificationControlsEnabled: !prev.notificationControlsEnabled,
+                  }))
+                }
+                onToggleAutoReconnect={() =>
+                  setSystem((prev) => ({
+                    ...prev,
+                    autoReconnect: !prev.autoReconnect,
+                  }))
+                }
               />
             )}
 
@@ -742,6 +1127,7 @@ export default function App() {
                 playtimeBoost={system.playtimeBoost}
                 savedProfiles={savedProfiles}
                 onChangeBandGain={handleChangeBandGain}
+                onApplyCalibratedGains={handleApplyCalibratedGains}
                 onSelectPreset={handleSelectEqPreset}
                 onResetFlat={() => handleSelectEqPreset(EqPresetId.Flat)}
                 onChangeBassBoost={(bassBoost) =>
@@ -759,6 +1145,8 @@ export default function App() {
                 onSaveProfile={handleSaveProfile}
                 onApplySavedProfile={handleApplySavedProfile}
                 onDeleteSavedProfile={handleDeleteSavedProfile}
+                onExportFullBackup={handleExportFullBackup}
+                onImportFullBackupFile={handleImportFullBackupFile}
               />
             )}
 
@@ -767,11 +1155,15 @@ export default function App() {
                 micGuitar={micGuitar}
                 auracastMode={system.auracastMode}
                 stereoChannel={system.stereoChannel}
+                customSamples={customSamples}
                 onTriggerDjEffect={handleTriggerDjEffect}
                 onUpdateMicGuitar={(patch) =>
                   setMicGuitar((prev) => ({ ...prev, ...patch }))
                 }
-                onResetMicGuitar={() => setMicGuitar(DEFAULT_MIC_GUITAR)}
+                onResetMicGuitar={() => {
+                  audioEngine.stopLiveKaraoke();
+                  setMicGuitar(DEFAULT_MIC_GUITAR);
+                }}
                 onChangeAuracast={(auracastMode, channel) =>
                   setSystem((prev) => ({
                     ...prev,
@@ -779,6 +1171,8 @@ export default function App() {
                     ...(channel ? { stereoChannel: channel } : {}),
                   }))
                 }
+                onSaveCustomSample={handleSaveCustomSample}
+                onClearCustomSample={handleClearCustomSample}
               />
             )}
 
@@ -798,7 +1192,7 @@ export default function App() {
       {/* Mobile Ergonomic Bottom Navigation Bar (< 15% Viewport Height) */}
       <nav
         aria-label="ניווט תחתון לנייד"
-        className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur-md dark:border-slate-700/80 dark:bg-[#1A2233]/95 md:hidden"
+        className="neon-header fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur-md dark:border-slate-700/80 dark:bg-[#1A2233]/95 md:hidden"
       >
         <div
           className={`grid h-16 items-center px-1.5 ${
@@ -815,7 +1209,9 @@ export default function App() {
                 onClick={() => setActiveTab(item.id)}
                 className={`flex min-h-[48px] flex-col items-center justify-center rounded-xl transition-colors ${
                   active
-                    ? 'text-[#D95B2B] font-semibold'
+                    ? themeMode === 'neon'
+                      ? 'text-cyan-400 font-semibold'
+                      : 'text-[#D95B2B] font-semibold'
                     : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >

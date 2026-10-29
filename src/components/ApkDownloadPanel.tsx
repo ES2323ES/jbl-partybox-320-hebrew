@@ -69,15 +69,15 @@ const FALLBACK_META: ApkBuildMetadata = {
   zipFileName: ZIP_FILE_NAME,
   packageName: 'com.jblpartybox320.hebrewcontrol',
   versionName: APP_VERSION,
-  versionCode: 2,
+  versionCode: 3,
   minSdk: 24,
   targetSdk: 34,
-  sizeBytes: 5252881,
-  sizeFormatted: '5.01 MB',
-  sha256: 'dfdcdabbeb56cba4ea9c97646d18fb54b1bc2842c5dc469be3e6cecbd417c6d4',
-  zipSizeBytes: 5206030,
-  zipSizeFormatted: '4.96 MB',
-  zipSha256: 'aef23d84526c300f2b1fb2f6c8ba8893c3a89ba22a6d4762b20ac36593f0a5e7',
+  sizeBytes: 1758847,
+  sizeFormatted: '1.68 MB',
+  sha256: '58b6a7b93a3bfd6baad4c5f2a9d0564184a6468335c6d0eaa1058297c206d0c2',
+  zipSizeBytes: 1753656,
+  zipSizeFormatted: '1.67 MB',
+  zipSha256: '6713a6f9e4dbfb87b9b97c6d211a4b7bd94a49b9c39af14da193161011778832',
   builtAt: '2026-10-29',
 };
 
@@ -248,8 +248,8 @@ export const ApkDownloadPanel: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Section 1: Primary ZIP + APK Download Card (v0.2.2) */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-8">
+      {/* Section 1: Primary ZIP + APK Download Card (v0.2.3) */}
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-8">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-2">
             <div className="flex items-center gap-2.5">
@@ -259,7 +259,7 @@ export const ApkDownloadPanel: React.FC = () => {
               </h2>
             </div>
             <p className="max-w-xl text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-              חבילת ההתקנה המעודכנת (<strong className="font-mono" dir="ltr">v{meta.versionName}</strong>) כוללת עיצוב נעים לעין, הרשאות Bluetooth מלאות לסריקה וזיווג מול ה-JBL PartyBox 320, וסנכרון עוצמת שמע ואיקוולייזר.
+              חבילת ההתקנה המעודכנת (<strong className="font-mono" dir="ltr">v{meta.versionName}</strong>) כוללת <strong>תאורת ניאון זוהרת</strong>, 5 סצנות מסיבה חכמות, קריוקי חי מהטלפון, נגן פלייליסט עם Crossfade, כיול חדר אקוסטי, סמפלר הקלטה אישי, שליטה מווילון ההתראות והרשאות Bluetooth מלאות.
             </p>
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pt-1 text-xs text-slate-500 dark:text-slate-400">
               <span className="font-mono font-semibold text-slate-800 dark:text-slate-200 tabular-nums" dir="ltr">
@@ -270,7 +270,7 @@ export const ApkDownloadPanel: React.FC = () => {
                 {zipSizeLabel}
               </span>
               <span aria-hidden="true">·</span>
-              <span>כולל הרשאות Bluetooth + שמע</span>
+              <span>כולל הרשאות Bluetooth + שמע + התראות מהירות</span>
             </div>
           </div>
 
@@ -391,7 +391,7 @@ export const ApkDownloadPanel: React.FC = () => {
       </section>
 
       {/* Section 2: Permanent GitHub Key & Automatic Sequential Versioning (v2, v3, v4...) */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-8">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738] sm:p-8">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="flex items-center gap-2.5">
@@ -614,14 +614,14 @@ export const ApkDownloadPanel: React.FC = () => {
               className="flex min-h-[48px] items-center gap-2 rounded-xl bg-[#D95B2B] px-6 py-2.5 text-sm font-bold text-white hover:bg-[#C24E22] disabled:opacity-70 cursor-pointer"
             >
               <RefreshCw className={`h-4 w-4 ${startingFlow ? 'animate-spin' : ''}`} />
-              <span>חבר מפתח קבוע ועדכן את המאגר (v2 · 0.2.2)</span>
+              <span>חבר מפתח קבוע ועדכן את המאגר (v3 · {APP_VERSION})</span>
             </button>
           </div>
         )}
       </section>
 
       {/* Section 3: Cryptographic & Package Details */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200">
           <ShieldCheck className="h-4 w-4 text-teal-600 dark:text-teal-400" />
           <span>מפרט טכני של חבילת האנדרואיד (APK v{meta.versionName})</span>
@@ -643,7 +643,7 @@ export const ApkDownloadPanel: React.FC = () => {
           <div className="flex items-center justify-between border-b border-slate-200/70 py-1.5 dark:border-slate-700/60">
             <span className="text-slate-500 dark:text-slate-400">הרשאות כלולות</span>
             <span className="text-slate-800 dark:text-slate-200">
-              Bluetooth Scan & Connect · Audio · Mic
+              Bluetooth Scan & Connect · Audio · Mic · Notifications
             </span>
           </div>
           <div className="flex items-center justify-between border-b border-slate-200/70 py-1.5 dark:border-slate-700/60">

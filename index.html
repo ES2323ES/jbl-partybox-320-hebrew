@@ -31,10 +31,13 @@
     <script>
       try {
         var savedTheme = localStorage.getItem('jbl_pb320_theme_v2');
-        if (savedTheme === 'dark') {
+        if (savedTheme === 'neon') {
+          document.documentElement.classList.add('dark', 'theme-neon');
+        } else if (savedTheme === 'dark') {
           document.documentElement.classList.add('dark');
+          document.documentElement.classList.remove('theme-neon');
         } else {
-          document.documentElement.classList.remove('dark');
+          document.documentElement.classList.remove('dark', 'theme-neon');
         }
       } catch (e) {}
     </script>

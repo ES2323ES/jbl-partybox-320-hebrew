@@ -6,7 +6,10 @@ export enum NavTab {
   ApkDownload = 'apk_download',
 }
 
+export type AppVisualTheme = 'light' | 'dark' | 'neon';
+
 export enum LightshowPresetId {
+  Neon = 'neon',
   Rock = 'rock',
   Flow = 'flow',
   Cross = 'cross',
@@ -102,9 +105,10 @@ export interface MicGuitarState {
   channel2Volume: number; // 0 - 100
   channel2Gain: number; // 0 - 100
   vocalDucking: boolean;
+  liveKaraokeActive?: boolean;
 }
 
-export const APP_VERSION = '0.2.2';
+export const APP_VERSION = '0.2.3';
 
 export interface SpeakerSystemState {
   deviceName: string;
@@ -116,9 +120,15 @@ export interface SpeakerSystemState {
   playtimeBoost: boolean;
   auracastMode: AuracastMode;
   stereoChannel: 'L' | 'R';
+  autoReconnect: boolean;
+  notificationControlsEnabled: boolean;
 }
 
-export type DemoGrooveId = 'house_124' | 'sub_tech_128' | 'mediterranean_112' | 'bass_sweep';
+export type DemoGrooveId =
+  | 'house_124'
+  | 'sub_tech_128'
+  | 'mediterranean_112'
+  | 'bass_sweep';
 
 export type DjPadEffectId =
   | 'airhorn'
@@ -127,6 +137,53 @@ export type DjPadEffectId =
   | 'scratch'
   | 'applause'
   | 'siren';
+
+export type PartySceneId =
+  | 'neon_club'
+  | 'chill_welcome'
+  | 'peak_party'
+  | 'karaoke_stage'
+  | 'night_neighbors';
+
+export interface PartySceneDefinition {
+  id: PartySceneId;
+  title: string;
+  subtitle: string;
+  lightPreset: LightshowPresetId;
+  primaryColor: string;
+  secondaryColor: string;
+  brightness: number;
+  strobeIntensity: number;
+  disableStrobes?: boolean;
+  gains: number[];
+  bassBoost: BassBoostMode;
+  volume: number;
+  vocalDucking?: boolean;
+  echo?: number;
+}
+
+export interface PlaylistTrack {
+  id: string;
+  name: string;
+  url: string;
+}
+
+export interface CustomSamplerSlot {
+  slotIndex: number; // 0..3
+  label: string;
+  audioDataUrl: string | null;
+  durationSec: number;
+}
+
+export interface FullBackupBundle {
+  appVersion: string;
+  exportedAt: string;
+  lightshow: LightshowState;
+  eq: EqualizerState;
+  micGuitar: MicGuitarState;
+  savedProfiles: SavedEqProfile[];
+  customSamples?: CustomSamplerSlot[];
+}
 
 export const EQ_BANDS: EqBandDefinition[] = [
   { index: 0, freq: 63, labelHz: '63Hz', hebrewRole: 'סאב-בס' },
@@ -183,6 +240,12 @@ export const LIGHTSHOW_PRESETS: Record<
     defaultSecondary: string;
   }
 > = {
+  [LightshowPresetId.Neon]: {
+    title: 'ניאון זוהר (Neon)',
+    description: 'הילת ניאון דו-שכבתית בטורקיז חשמלי ומג׳נטה זוהרת עם שובלי אור מסונכרנים',
+    defaultPrimary: '#00F0FF',
+    defaultSecondary: '#E838FF',
+  },
   [LightshowPresetId.Rock]: {
     title: 'רוק (Rock)',
     description: 'פעימות אנרגטיות חדות בטבעות הוופרים עם הבזקים מסונכרנים לקצב התופים',
@@ -209,7 +272,7 @@ export const LIGHTSHOW_PRESETS: Record<
   },
   [LightshowPresetId.Flash]: {
     title: 'מבזק מועדון (Flash)',
-    description: 'דגש על מבזקי הסטרוב העليון והתחתון יחד עם נצנוצי כוכבים מהירים',
+    description: 'דגש על מבזקי הסטרוב העליון והתחתון יחד עם נצנוצי כוכבים מהירים',
     defaultPrimary: '#F8FAFC',
     defaultSecondary: '#FF5500',
   },
@@ -227,10 +290,83 @@ export const COLOR_SWATCH_PAIRS: Array<{
   primary: string;
   secondary: string;
 }> = [
+  { id: 'neon_cyber', name: 'ניאון חשמלי', primary: '#00F0FF', secondary: '#E838FF' },
+  { id: 'neon_sunset', name: 'ניאון שקיעה', primary: '#FF2A85', secondary: '#7B2CBF' },
   { id: 'jbl_orange', name: 'כתום JBL', primary: '#FF5500', secondary: '#FFB800' },
-  { id: 'solar_crimson', name: 'להבה אדומה', primary: '#EF4444', secondary: '#F97316' },
   { id: 'arctic_cyan', name: 'קרח טורקיז', primary: '#06B6D4', secondary: '#3B82F6' },
   { id: 'emerald_pulse', name: 'אזמרגד חי', primary: '#10B981', secondary: '#84CC16' },
   { id: 'amber_lounge', name: 'ענבר חם', primary: '#F59E0B', secondary: '#FDE047' },
-  { id: 'pure_strobe', name: 'לבן במה', primary: '#F8FAFC', secondary: '#94A3B8' },
+];
+
+export const PARTY_SCENES: PartySceneDefinition[] = [
+  {
+    id: 'neon_club',
+    title: 'מועדון ניאון זוהר',
+    subtitle: 'תאורת ניאון חשמלית + איקוולייזר מסיבה ובס הדוק',
+    lightPreset: LightshowPresetId.Neon,
+    primaryColor: '#00F0FF',
+    secondaryColor: '#E838FF',
+    brightness: 95,
+    strobeIntensity: 45,
+    gains: [6.5, 5.0, 1.0, -1.0, 1.5, 4.0, 5.5],
+    bassBoost: BassBoostMode.Punchy,
+    volume: 82,
+  },
+  {
+    id: 'chill_welcome',
+    title: 'קבלת פנים רגועה',
+    subtitle: 'זרימת תאורה רכה ללא סטרובים + סאונד מאוזן ונעים',
+    lightPreset: LightshowPresetId.Flow,
+    primaryColor: '#38BDF8',
+    secondaryColor: '#818CF8',
+    brightness: 55,
+    strobeIntensity: 0,
+    disableStrobes: true,
+    gains: [3.5, 2.5, 0.5, 0.0, 1.0, 2.5, 3.0],
+    bassBoost: BassBoostMode.Deep,
+    volume: 48,
+  },
+  {
+    id: 'peak_party',
+    title: 'שיא מסיבה',
+    subtitle: 'עוצמה גבוהה, בס עמוק ומבזקים מסונכרנים לקצב',
+    lightPreset: LightshowPresetId.Rock,
+    primaryColor: '#FF5500',
+    secondaryColor: '#FFB800',
+    brightness: 100,
+    strobeIntensity: 75,
+    gains: [8.0, 6.0, 2.0, -1.0, 1.0, 3.5, 4.5],
+    bassBoost: BassBoostMode.Punchy,
+    volume: 88,
+  },
+  {
+    id: 'karaoke_stage',
+    title: 'במת קריוקי ושירה',
+    subtitle: 'הבלטת תדרי קול, הד שירה והנמכת מוזיקה אוטומטית',
+    lightPreset: LightshowPresetId.Ripple,
+    primaryColor: '#EC4899',
+    secondaryColor: '#8B5CF6',
+    brightness: 75,
+    strobeIntensity: 10,
+    disableStrobes: true,
+    gains: [-2.0, -1.5, 1.0, 3.5, 5.0, 3.5, 1.5],
+    bassBoost: BassBoostMode.Off,
+    volume: 68,
+    vocalDucking: true,
+    echo: 42,
+  },
+  {
+    id: 'night_neighbors',
+    title: 'מצב לילה לשכנים',
+    subtitle: 'סינון תדרי סאב שעוברים קירות ושמירה על צליל עשיר וברור',
+    lightPreset: LightshowPresetId.Freeze,
+    primaryColor: '#F59E0B',
+    secondaryColor: '#FB923C',
+    brightness: 30,
+    strobeIntensity: 0,
+    disableStrobes: true,
+    gains: [-6.5, -4.5, 0.0, 1.5, 2.5, 2.5, 1.5],
+    bassBoost: BassBoostMode.Off,
+    volume: 34,
+  },
 ];

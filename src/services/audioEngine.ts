@@ -4,6 +4,7 @@ import {
   DemoGrooveId,
   DjPadEffectId,
   EQ_BANDS,
+  PlaylistTrack,
 } from '../types/speaker';
 import { bluetoothBridge } from './bluetoothBridge';
 
@@ -14,10 +15,19 @@ export interface AudioAnalysisFrame {
   highEnergy: number; // 0..1
   isBeat: boolean;
   djFlare: number; // 0..1 decaying flare triggered by DJ pads
+  karaokeVoiceLevel: number; // 0..1 live vocal mic energy
+}
+
+export interface RoomCalibrationResult {
+  calibratedGains: number[];
+  detectedEnvironment: AcousticEnvironment;
+  summaryHe: string;
+  usedLiveMic: boolean;
 }
 
 class PartyBoxAudioEngine {
   private ctx: AudioContext | null = null;
+  private musicDuckGain: GainNode | null = null;
   private eqFilters: BiquadFilterNode[] = [];
   private bassBoostFilter: BiquadFilterNode | null = null;
   private environmentLowFilter: BiquadFilterNode | null = null;
@@ -27,19 +37,48 @@ class PartyBoxAudioEngine {
   private analyser: AnalyserNode | null = null;
   private freqData: Uint8Array<ArrayBuffer> | null = null;
 
-  // Sources
+  // Sources & Dual-Deck Crossfade Playlist
   private sourceMode: 'groove' | 'file' | 'mic' = 'groove';
   private isPlaying = false;
   private currentGroove: DemoGrooveId = 'house_124';
   private grooveTimer: number | null = null;
   private stepIndex = 0;
 
-  private audioElement: HTMLAudioElement | null = null;
-  private mediaElementSource: MediaElementAudioSourceNode | null = null;
+  private deckA: HTMLAudioElement | null = null;
+  private deckB: HTMLAudioElement | null = null;
+  private deckAGain: GainNode | null = null;
+  private deckBGain: GainNode | null = null;
+  private activeDeck: 'A' | 'B' = 'A';
+  private isCrossfadingNow = false;
+  private crossfadeEnabled = true;
+  private playlist: PlaylistTrack[] = [];
+  private playlistIndex = 0;
   private uploadedFileName: string | null = null;
+  private playlistListeners = new Set<() => void>();
 
+  // Ambient Mic Beat Sync
   private micStream: MediaStream | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
+
+  // Live Karaoke Mic Chain + Voice-Activated MC Auto-Ducking
+  private karaokeStream: MediaStream | null = null;
+  private karaokeSource: MediaStreamAudioSourceNode | null = null;
+  private karaokeHpFilter: BiquadFilterNode | null = null;
+  private karaokeBassFilter: BiquadFilterNode | null = null;
+  private karaokeTrebleFilter: BiquadFilterNode | null = null;
+  private karaokeDryGain: GainNode | null = null;
+  private karaokeDelay: DelayNode | null = null;
+  private karaokeFeedback: GainNode | null = null;
+  private karaokeWetGain: GainNode | null = null;
+  private karaokeAnalyser: AnalyserNode | null = null;
+  private karaokeTimeData: Uint8Array<ArrayBuffer> | null = null;
+  private karaokeActive = false;
+  private karaokeVocalDucking = false;
+  private lastVoiceDetectedMs = 0;
+  private currentVoiceRms = 0;
+
+  // Custom 4-Slot Sampler MediaRecorder
+  private activeRecorder: MediaRecorder | null = null;
 
   // Beat & DJ flare tracking
   private prevBassAvg = 0;
@@ -59,8 +98,12 @@ class PartyBoxAudioEngine {
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
       this.ctx = new AudioCtx();
+
+      this.musicDuckGain = this.ctx.createGain();
+      this.musicDuckGain.gain.value = 1.0;
 
       // Build 7-Band EQ chain
       this.eqFilters = EQ_BANDS.map((band, idx) => {
@@ -78,11 +121,9 @@ class PartyBoxAudioEngine {
         return filter;
       });
 
-      // BassBoost stage
       this.bassBoostFilter = this.ctx.createBiquadFilter();
       this.bassBoostFilter.type = 'peaking';
 
-      // Environment boundary compensation filters
       this.environmentLowFilter = this.ctx.createBiquadFilter();
       this.environmentLowFilter.type = 'lowshelf';
       this.environmentLowFilter.frequency.value = 95;
@@ -91,7 +132,6 @@ class PartyBoxAudioEngine {
       this.environmentHighFilter.type = 'highshelf';
       this.environmentHighFilter.frequency.value = 6500;
 
-      // AI Sound Boost Dynamics Processor
       this.compressor = this.ctx.createDynamicsCompressor();
       this.compressor.threshold.value = -16;
       this.compressor.knee.value = 18;
@@ -99,14 +139,14 @@ class PartyBoxAudioEngine {
       this.compressor.attack.value = 0.005;
       this.compressor.release.value = 0.14;
 
-      // Master Gain & Analyser
       this.masterGain = this.ctx.createGain();
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 256;
       this.analyser.smoothingTimeConstant = 0.76;
       this.freqData = new Uint8Array(this.analyser.frequencyBinCount);
 
-      // Connect DSP chain: eq[0]->...->eq[6]->bassBoost->envLow->envHigh->compressor->analyser->masterGain->destination
+      // Music chain: musicDuckGain -> eq[0..6] -> bassBoost -> envLow -> envHigh -> compressor -> analyser -> masterGain -> destination
+      this.musicDuckGain.connect(this.eqFilters[0]);
       for (let i = 0; i < this.eqFilters.length - 1; i++) {
         this.eqFilters[i].connect(this.eqFilters[i + 1]);
       }
@@ -130,14 +170,133 @@ class PartyBoxAudioEngine {
 
   private getChainInput(): AudioNode {
     this.ensureContext();
-    return this.eqFilters[0];
+    return this.musicDuckGain!;
+  }
+
+  private ensureDecks(): void {
+    const ctx = this.ensureContext();
+    if (!this.deckA) {
+      this.deckA = new Audio();
+      this.deckA.crossOrigin = 'anonymous';
+      this.deckAGain = ctx.createGain();
+      this.deckAGain.gain.value = 1;
+      const srcA = ctx.createMediaElementSource(this.deckA);
+      srcA.connect(this.deckAGain);
+      this.deckAGain.connect(this.getChainInput());
+
+      this.deckA.addEventListener('timeupdate', () => this.handleDeckTimeUpdate('A'));
+      this.deckA.addEventListener('ended', () => this.handleDeckEnded('A'));
+    }
+
+    if (!this.deckB) {
+      this.deckB = new Audio();
+      this.deckB.crossOrigin = 'anonymous';
+      this.deckBGain = ctx.createGain();
+      this.deckBGain.gain.value = 0;
+      const srcB = ctx.createMediaElementSource(this.deckB);
+      srcB.connect(this.deckBGain);
+      this.deckBGain.connect(this.getChainInput());
+
+      this.deckB.addEventListener('timeupdate', () => this.handleDeckTimeUpdate('B'));
+      this.deckB.addEventListener('ended', () => this.handleDeckEnded('B'));
+    }
+  }
+
+  private notifyPlaylistChanged(): void {
+    this.playlistListeners.forEach((cb) => cb());
+  }
+
+  public onPlaylistChange(cb: () => void): () => void {
+    this.playlistListeners.add(cb);
+    return () => {
+      this.playlistListeners.delete(cb);
+    };
+  }
+
+  private handleDeckTimeUpdate(deck: 'A' | 'B'): void {
+    if (this.sourceMode !== 'file' || deck !== this.activeDeck || !this.isPlaying) {
+      return;
+    }
+    const el = deck === 'A' ? this.deckA : this.deckB;
+    if (!el || !Number.isFinite(el.duration) || el.duration <= 6) return;
+
+    const remaining = el.duration - el.currentTime;
+    if (
+      this.crossfadeEnabled &&
+      this.playlist.length > 1 &&
+      remaining <= 3.2 &&
+      !this.isCrossfadingNow
+    ) {
+      const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
+      this.crossfadeToTrack(nextIdx, 3.0);
+    }
+  }
+
+  private handleDeckEnded(deck: 'A' | 'B'): void {
+    if (this.sourceMode !== 'file' || deck !== this.activeDeck) return;
+    if (this.playlist.length <= 1) {
+      const el = deck === 'A' ? this.deckA : this.deckB;
+      if (el) {
+        el.currentTime = 0;
+        el.play().catch(() => {});
+      }
+      return;
+    }
+    if (!this.isCrossfadingNow) {
+      const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
+      this.playPlaylistTrack(nextIdx).catch(() => {});
+    }
+  }
+
+  private crossfadeToTrack(nextIndex: number, fadeSeconds: number): void {
+    if (!this.ctx || !this.deckA || !this.deckB || !this.deckAGain || !this.deckBGain) {
+      return;
+    }
+    const track = this.playlist[nextIndex];
+    if (!track) return;
+
+    this.isCrossfadingNow = true;
+    const incomingDeck = this.activeDeck === 'A' ? 'B' : 'A';
+    const outgoingEl = this.activeDeck === 'A' ? this.deckA : this.deckB;
+    const incomingEl = incomingDeck === 'A' ? this.deckA : this.deckB;
+    const outgoingGain = this.activeDeck === 'A' ? this.deckAGain : this.deckBGain;
+    const incomingGain = incomingDeck === 'A' ? this.deckAGain : this.deckBGain;
+
+    const now = this.ctx.currentTime;
+    incomingEl.src = track.url;
+    incomingEl.currentTime = 0;
+    incomingGain.gain.cancelScheduledValues(now);
+    outgoingGain.gain.cancelScheduledValues(now);
+    incomingGain.gain.setValueAtTime(0.001, now);
+    outgoingGain.gain.setValueAtTime(1.0, now);
+
+    incomingEl
+      .play()
+      .then(() => {
+        if (!this.ctx) return;
+        const t = this.ctx.currentTime;
+        incomingGain.gain.linearRampToValueAtTime(1.0, t + fadeSeconds);
+        outgoingGain.gain.linearRampToValueAtTime(0.001, t + fadeSeconds);
+
+        this.activeDeck = incomingDeck;
+        this.playlistIndex = nextIndex;
+        this.uploadedFileName = track.name;
+        this.notifyPlaylistChanged();
+
+        window.setTimeout(() => {
+          outgoingEl.pause();
+          this.isCrossfadingNow = false;
+        }, fadeSeconds * 1000 + 120);
+      })
+      .catch(() => {
+        this.isCrossfadingNow = false;
+      });
   }
 
   public applyDspSettings(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
 
-    // 7-Band EQ
     this.eqFilters.forEach((filter, idx) => {
       const targetGain = this.currentPlaytimeBoost
         ? (this.currentGains[idx] ?? 0) * 0.65 - (idx <= 1 ? 2.5 : 0)
@@ -145,7 +304,6 @@ class PartyBoxAudioEngine {
       filter.gain.setTargetAtTime(targetGain, now, 0.025);
     });
 
-    // JBL BassBoost (Off / Deep 48Hz / Punchy 82Hz)
     if (this.bassBoostFilter) {
       if (this.currentPlaytimeBoost || this.currentBassBoost === BassBoostMode.Off) {
         this.bassBoostFilter.frequency.setTargetAtTime(60, now, 0.03);
@@ -162,7 +320,6 @@ class PartyBoxAudioEngine {
       }
     }
 
-    // Acoustic Environment (Indoor vs Outdoor open-air compensation)
     if (this.environmentLowFilter && this.environmentHighFilter) {
       if (this.currentEnvironment === AcousticEnvironment.Outdoor) {
         this.environmentLowFilter.gain.setTargetAtTime(2.5, now, 0.04);
@@ -173,13 +330,11 @@ class PartyBoxAudioEngine {
       }
     }
 
-    // AI Sound Boost compressor
     if (this.compressor) {
       this.compressor.threshold.setTargetAtTime(this.currentAiBoost ? -18 : -4, now, 0.04);
       this.compressor.ratio.setTargetAtTime(this.currentAiBoost ? 4.5 : 1.5, now, 0.04);
     }
 
-    // Master Volume
     if (this.masterGain) {
       const effectiveGain = this.currentMuted ? 0 : Math.pow(this.currentVolume / 100, 1.65);
       this.masterGain.gain.setTargetAtTime(effectiveGain, now, 0.025);
@@ -229,25 +384,12 @@ class PartyBoxAudioEngine {
         await ctx.setSinkId(deviceId);
         return true;
       }
-      if (this.audioElement) {
-        const el = this.audioElement as HTMLAudioElement & {
-          setSinkId?: (id: string) => Promise<void>;
-        };
-        if (typeof el.setSinkId === 'function') {
-          await el.setSinkId(deviceId);
-          return true;
-        }
-      }
     } catch {
       return false;
     }
     return false;
   }
 
-  /**
-   * Computes exact composite dB response across 64 log-spaced frequencies (25Hz - 18kHz)
-   * so the Equalizer curve reflects EQ + BassBoost + Acoustic Environment in real time.
-   */
   public computeCompositeCurve(
     gains: number[],
     bassBoost: BassBoostMode,
@@ -262,7 +404,6 @@ class PartyBoxAudioEngine {
       freqs[i] = Math.pow(10, minLog + (i / (numPoints - 1)) * (maxLog - minLog));
     }
 
-    // Analytical biquad magnitude approximation so the curve renders smoothly even before AudioContext starts
     const results: Array<{ freq: number; db: number }> = [];
     for (let i = 0; i < numPoints; i++) {
       const f = freqs[i];
@@ -276,15 +417,12 @@ class PartyBoxAudioEngine {
 
         const octaveDist = Math.log2(f / band.freq);
         if (idx === 0) {
-          // Low-shelf smooth transition
           const weight = 1 / (1 + Math.exp(octaveDist * 2.8));
           totalDb += g * weight;
         } else if (idx === EQ_BANDS.length - 1) {
-          // High-shelf smooth transition
           const weight = 1 / (1 + Math.exp(-octaveDist * 2.8));
           totalDb += g * weight;
         } else {
-          // Bell filter
           const bandwidth = 0.72;
           const weight = Math.exp(-(octaveDist * octaveDist) / (2 * bandwidth * bandwidth));
           totalDb += g * weight;
@@ -310,23 +448,34 @@ class PartyBoxAudioEngine {
     return results;
   }
 
-  // --- Playback & Sources ---
+  // --- Playback, Playlist & Crossfade ---
 
   public getSourceState() {
+    const activeEl = this.activeDeck === 'A' ? this.deckA : this.deckB;
     return {
       sourceMode: this.sourceMode,
       isPlaying: this.isPlaying,
       currentGroove: this.currentGroove,
       uploadedFileName: this.uploadedFileName,
+      playlist: this.playlist,
+      playlistIndex: this.playlistIndex,
+      crossfadeEnabled: this.crossfadeEnabled,
+      currentTime: activeEl?.currentTime || 0,
+      duration: Number.isFinite(activeEl?.duration) ? activeEl!.duration : 0,
     };
+  }
+
+  public setCrossfadeEnabled(enabled: boolean): void {
+    this.crossfadeEnabled = enabled;
+    this.notifyPlaylistChanged();
   }
 
   public startGroove(grooveId?: DemoGrooveId): void {
     const ctx = this.ensureContext();
     this.stopMicCapture();
-    if (this.audioElement && !this.audioElement.paused) {
-      this.audioElement.pause();
-    }
+    this.deckA?.pause();
+    this.deckB?.pause();
+    this.isCrossfadingNow = false;
 
     if (grooveId) {
       this.currentGroove = grooveId;
@@ -361,11 +510,14 @@ class PartyBoxAudioEngine {
       this.pause();
       return false;
     }
-    if (this.sourceMode === 'file' && this.audioElement) {
-      this.ensureContext();
-      this.audioElement.play().catch(() => {});
-      this.isPlaying = true;
-      return true;
+    if (this.sourceMode === 'file' && this.playlist.length > 0) {
+      this.ensureDecks();
+      const el = this.activeDeck === 'A' ? this.deckA : this.deckB;
+      if (el) {
+        el.play().catch(() => {});
+        this.isPlaying = true;
+        return true;
+      }
     }
     this.startGroove(this.currentGroove);
     return true;
@@ -377,36 +529,103 @@ class PartyBoxAudioEngine {
       window.clearInterval(this.grooveTimer);
       this.grooveTimer = null;
     }
-    if (this.audioElement && !this.audioElement.paused) {
-      this.audioElement.pause();
-    }
+    this.deckA?.pause();
+    this.deckB?.pause();
     if (this.sourceMode === 'mic') {
       this.stopMicCapture();
       this.sourceMode = 'groove';
     }
+    this.notifyPlaylistChanged();
   }
 
-  public async loadAudioFile(file: File): Promise<string> {
-    const ctx = this.ensureContext();
+  public async loadAudioFiles(files: File[]): Promise<string> {
+    if (files.length === 0) return '';
+    this.ensureDecks();
     this.pause();
     this.stopMicCapture();
 
-    const objectUrl = URL.createObjectURL(file);
-    if (!this.audioElement) {
-      this.audioElement = new Audio();
-      this.audioElement.crossOrigin = 'anonymous';
-      this.audioElement.loop = true;
-      this.mediaElementSource = ctx.createMediaElementSource(this.audioElement);
-      this.mediaElementSource.connect(this.getChainInput());
-    }
+    const addedTracks: PlaylistTrack[] = files.map((f, i) => ({
+      id: `trk_${Date.now()}_${i}`,
+      name: f.name,
+      url: URL.createObjectURL(f),
+    }));
 
-    this.audioElement.src = objectUrl;
-    this.uploadedFileName = file.name;
-    this.sourceMode = 'file';
-    await this.audioElement.play();
-    this.isPlaying = true;
-    return file.name;
+    const startIndex = this.playlist.length;
+    this.playlist = [...this.playlist, ...addedTracks];
+    await this.playPlaylistTrack(startIndex);
+    return addedTracks[0].name;
   }
+
+  public async loadAudioFile(file: File): Promise<string> {
+    return this.loadAudioFiles([file]);
+  }
+
+  public async playPlaylistTrack(index: number): Promise<void> {
+    if (index < 0 || index >= this.playlist.length) return;
+    const ctx = this.ensureContext();
+    this.ensureDecks();
+    if (this.grooveTimer !== null) {
+      window.clearInterval(this.grooveTimer);
+      this.grooveTimer = null;
+    }
+    this.stopMicCapture();
+    this.isCrossfadingNow = false;
+
+    const track = this.playlist[index];
+    this.playlistIndex = index;
+    this.uploadedFileName = track.name;
+    this.sourceMode = 'file';
+
+    const el = this.activeDeck === 'A' ? this.deckA! : this.deckB!;
+    const otherEl = this.activeDeck === 'A' ? this.deckB! : this.deckA!;
+    const activeGain = this.activeDeck === 'A' ? this.deckAGain! : this.deckBGain!;
+    const otherGain = this.activeDeck === 'A' ? this.deckBGain! : this.deckAGain!;
+
+    otherEl.pause();
+    activeGain.gain.cancelScheduledValues(ctx.currentTime);
+    otherGain.gain.cancelScheduledValues(ctx.currentTime);
+    activeGain.gain.setValueAtTime(1.0, ctx.currentTime);
+    otherGain.gain.setValueAtTime(0.0, ctx.currentTime);
+
+    el.src = track.url;
+    el.currentTime = 0;
+    await el.play();
+    this.isPlaying = true;
+    this.notifyPlaylistChanged();
+  }
+
+  public nextTrack(): void {
+    if (this.playlist.length === 0) return;
+    const nextIdx = (this.playlistIndex + 1) % this.playlist.length;
+    if (this.crossfadeEnabled && this.isPlaying && this.playlist.length > 1) {
+      this.crossfadeToTrack(nextIdx, 1.8);
+    } else {
+      this.playPlaylistTrack(nextIdx).catch(() => {});
+    }
+  }
+
+  public prevTrack(): void {
+    if (this.playlist.length === 0) return;
+    const prevIdx =
+      (this.playlistIndex - 1 + this.playlist.length) % this.playlist.length;
+    this.playPlaylistTrack(prevIdx).catch(() => {});
+  }
+
+  public clearPlaylist(): void {
+    this.deckA?.pause();
+    this.deckB?.pause();
+    this.playlist.forEach((t) => URL.revokeObjectURL(t.url));
+    this.playlist = [];
+    this.playlistIndex = 0;
+    this.uploadedFileName = null;
+    if (this.sourceMode === 'file') {
+      this.sourceMode = 'groove';
+      this.isPlaying = false;
+    }
+    this.notifyPlaylistChanged();
+  }
+
+  // --- Ambient Room Beat-Sync Mic ---
 
   public async startMicBeatSync(): Promise<boolean> {
     try {
@@ -421,7 +640,6 @@ class PartyBoxAudioEngine {
       });
       this.micStream = stream;
       this.micSource = ctx.createMediaStreamSource(stream);
-      // Connect ONLY to analyser (not masterGain) to prevent speaker feedback howling
       if (this.analyser) {
         this.micSource.connect(this.analyser);
       }
@@ -448,7 +666,354 @@ class PartyBoxAudioEngine {
     }
   }
 
-  // --- Synthesized Musical Groove Engine (Rich Low-End, Mid Chords & Crisp Hats) ---
+  // --- Live Karaoke Microphone Engine + Real Voice Auto-Ducking ---
+
+  public async setLiveKaraokeEnabled(
+    enabled: boolean,
+    params: {
+      volume: number;
+      bassDb: number;
+      trebleDb: number;
+      echoPercent: number;
+      vocalDucking: boolean;
+    }
+  ): Promise<boolean> {
+    if (!enabled) {
+      this.stopLiveKaraoke();
+      return true;
+    }
+
+    try {
+      const ctx = this.ensureContext();
+      this.stopLiveKaraoke();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      this.karaokeStream = stream;
+      this.karaokeSource = ctx.createMediaStreamSource(stream);
+
+      this.karaokeHpFilter = ctx.createBiquadFilter();
+      this.karaokeHpFilter.type = 'highpass';
+      this.karaokeHpFilter.frequency.value = 85;
+
+      this.karaokeBassFilter = ctx.createBiquadFilter();
+      this.karaokeBassFilter.type = 'lowshelf';
+      this.karaokeBassFilter.frequency.value = 185;
+
+      this.karaokeTrebleFilter = ctx.createBiquadFilter();
+      this.karaokeTrebleFilter.type = 'highshelf';
+      this.karaokeTrebleFilter.frequency.value = 4200;
+
+      this.karaokeDryGain = ctx.createGain();
+      this.karaokeDelay = ctx.createDelay(1.0);
+      this.karaokeDelay.delayTime.value = 0.24;
+
+      const echoDamp = ctx.createBiquadFilter();
+      echoDamp.type = 'lowpass';
+      echoDamp.frequency.value = 2600;
+
+      this.karaokeFeedback = ctx.createGain();
+      this.karaokeWetGain = ctx.createGain();
+
+      this.karaokeAnalyser = ctx.createAnalyser();
+      this.karaokeAnalyser.fftSize = 256;
+      this.karaokeTimeData = new Uint8Array(this.karaokeAnalyser.fftSize);
+
+      // Connect vocal chain: mic -> hp -> bass -> treble -> analyser + dry + echo loop -> masterGain
+      this.karaokeSource.connect(this.karaokeHpFilter);
+      this.karaokeHpFilter.connect(this.karaokeBassFilter);
+      this.karaokeBassFilter.connect(this.karaokeTrebleFilter);
+      this.karaokeTrebleFilter.connect(this.karaokeAnalyser);
+
+      this.karaokeTrebleFilter.connect(this.karaokeDryGain);
+      this.karaokeDryGain.connect(this.masterGain!);
+
+      this.karaokeTrebleFilter.connect(this.karaokeDelay);
+      this.karaokeDelay.connect(echoDamp);
+      echoDamp.connect(this.karaokeFeedback);
+      this.karaokeFeedback.connect(this.karaokeDelay);
+      echoDamp.connect(this.karaokeWetGain);
+      this.karaokeWetGain.connect(this.masterGain!);
+
+      this.karaokeActive = true;
+      this.updateLiveKaraokeParams(params);
+      return true;
+    } catch {
+      this.stopLiveKaraoke();
+      return false;
+    }
+  }
+
+  public updateLiveKaraokeParams(params: {
+    volume: number;
+    bassDb: number;
+    trebleDb: number;
+    echoPercent: number;
+    vocalDucking: boolean;
+  }): void {
+    this.karaokeVocalDucking = params.vocalDucking;
+    if (!this.ctx || !this.karaokeActive) return;
+
+    const now = this.ctx.currentTime;
+    const micGain = (params.volume / 100) * 1.15;
+    this.karaokeDryGain?.gain.setTargetAtTime(micGain, now, 0.03);
+    this.karaokeBassFilter?.gain.setTargetAtTime(params.bassDb, now, 0.03);
+    this.karaokeTrebleFilter?.gain.setTargetAtTime(params.trebleDb, now, 0.03);
+
+    const echoNorm = params.echoPercent / 100;
+    this.karaokeFeedback?.gain.setTargetAtTime(echoNorm * 0.52, now, 0.04);
+    this.karaokeWetGain?.gain.setTargetAtTime(micGain * echoNorm * 0.65, now, 0.04);
+  }
+
+  public stopLiveKaraoke(): void {
+    this.karaokeActive = false;
+    this.currentVoiceRms = 0;
+    if (this.karaokeSource) {
+      try {
+        this.karaokeSource.disconnect();
+      } catch {
+        // ignore
+      }
+      this.karaokeSource = null;
+    }
+    if (this.karaokeStream) {
+      this.karaokeStream.getTracks().forEach((t) => t.stop());
+      this.karaokeStream = null;
+    }
+    if (this.ctx && this.musicDuckGain) {
+      this.musicDuckGain.gain.setTargetAtTime(1.0, this.ctx.currentTime, 0.12);
+    }
+  }
+
+  // --- 5-Second Smart Acoustic Room Calibration ---
+
+  public async runAcousticRoomCalibration(
+    onProgress: (percent: number, stageLabel: string) => void
+  ): Promise<RoomCalibrationResult> {
+    const ctx = this.ensureContext();
+    onProgress(8, 'מאתחל אות בדיקה אקוסטי ומאזין לחלל...');
+
+    let calibStream: MediaStream | null = null;
+    let calibAnalyser: AnalyserNode | null = null;
+    let calibSource: MediaStreamAudioSourceNode | null = null;
+    let usedLiveMic = false;
+
+    try {
+      calibStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      calibSource = ctx.createMediaStreamSource(calibStream);
+      calibAnalyser = ctx.createAnalyser();
+      calibAnalyser.fftSize = 1024;
+      calibAnalyser.smoothingTimeConstant = 0.55;
+      calibSource.connect(calibAnalyser);
+      usedLiveMic = true;
+    } catch {
+      usedLiveMic = false;
+    }
+
+    // Play a pleasant 4.4s logarithmic reference sweep + warm pink pulse through the speaker
+    const now = ctx.currentTime;
+    const sweepOsc = ctx.createOscillator();
+    const sweepGain = ctx.createGain();
+    sweepOsc.type = 'sine';
+    sweepOsc.frequency.setValueAtTime(52, now);
+    sweepOsc.frequency.exponentialRampToValueAtTime(11500, now + 4.2);
+
+    sweepGain.gain.setValueAtTime(0.001, now);
+    sweepGain.gain.linearRampToValueAtTime(0.16, now + 0.25);
+    sweepGain.gain.setValueAtTime(0.16, now + 3.8);
+    sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 4.35);
+
+    sweepOsc.connect(sweepGain);
+    sweepGain.connect(this.masterGain!);
+    sweepOsc.start(now);
+    sweepOsc.stop(now + 4.4);
+
+    const bandAccum = new Array(EQ_BANDS.length).fill(0);
+    const bandSamples = new Array(EQ_BANDS.length).fill(0);
+    const totalSteps = 22;
+    const fftBuf = calibAnalyser
+      ? new Uint8Array(calibAnalyser.frequencyBinCount)
+      : null;
+
+    for (let step = 1; step <= totalSteps; step++) {
+      await new Promise((r) => window.setTimeout(r, 200));
+      const pct = Math.min(96, Math.round((step / totalSteps) * 95));
+      const stage =
+        pct < 35
+          ? 'מודד החזרי בס ותהודת פינות (63Hz–250Hz)...'
+          : pct < 75
+            ? 'מנתח בהירות ווקאל ואיזון מיד (500Hz–4kHz)...'
+            : 'מחשב פיצוי גבוהים והתאמת סביבה (12kHz)...';
+      onProgress(pct, stage);
+
+      if (calibAnalyser && fftBuf) {
+        calibAnalyser.getByteFrequencyData(fftBuf);
+        const nyquist = ctx.sampleRate / 2;
+        EQ_BANDS.forEach((b, idx) => {
+          const bin = Math.max(
+            1,
+            Math.min(
+              fftBuf.length - 1,
+              Math.round((b.freq / nyquist) * fftBuf.length)
+            )
+          );
+          bandAccum[idx] += fftBuf[bin];
+          bandSamples[idx] += 1;
+        });
+      }
+    }
+
+    if (calibSource) {
+      try {
+        calibSource.disconnect();
+      } catch {
+        // ignore
+      }
+    }
+    if (calibStream) {
+      calibStream.getTracks().forEach((t) => t.stop());
+    }
+
+    let calibratedGains: number[];
+    let detectedEnvironment: AcousticEnvironment;
+
+    if (usedLiveMic && bandSamples[0] > 0) {
+      const avgs = bandAccum.map((sum, i) => sum / Math.max(1, bandSamples[i]));
+      const overallMean =
+        avgs.reduce((acc, v) => acc + v, 0) / Math.max(1, avgs.length);
+
+      calibratedGains = avgs.map((val, idx) => {
+        const diffNormalized = (overallMean - val) / 28;
+        const jblTargetBias = [3.5, 2.5, 0.0, 0.5, 1.5, 2.5, 3.0][idx];
+        const raw = jblTargetBias + diffNormalized * 2.2;
+        return Math.round(Math.max(-8, Math.min(8, raw)) * 2) / 2;
+      });
+
+      const lowRatio = (avgs[0] + avgs[1]) / (2 * Math.max(1, overallMean));
+      detectedEnvironment =
+        lowRatio < 0.88 ? AcousticEnvironment.Outdoor : AcousticEnvironment.Indoor;
+    } else {
+      detectedEnvironment = this.currentEnvironment;
+      calibratedGains =
+        detectedEnvironment === AcousticEnvironment.Outdoor
+          ? [6.5, 5.0, 1.5, 0.5, 2.0, 4.0, 4.5]
+          : [4.0, 2.5, -1.0, 0.5, 2.0, 3.0, 3.5];
+    }
+
+    onProgress(100, 'הכיול האקוסטי הושלם והוחל על הרמקול!');
+
+    return {
+      calibratedGains,
+      detectedEnvironment,
+      usedLiveMic,
+      summaryHe: usedLiveMic
+        ? detectedEnvironment === AcousticEnvironment.Outdoor
+          ? 'זוהתה התפשטות אקוסטית פתוחה — הוגברו תדרי הסאב והגבוהים לפיצוי מרחבי מדויק.'
+          : 'זוהה חלל פנים עם החזרי קירות — רוסנו תדרי הבום ב-125Hz–250Hz וחודדה נוכחות השירה.'
+        : 'הוחל פרופיל כיול אופטימלי מאוזן עבור זוג הוופרים והטוויטרים של ה-Stage 320.',
+    };
+  }
+
+  // --- Custom 4-Slot Voice / Sound Sampler Recorder ---
+
+  public async startSampleRecording(maxSeconds = 4): Promise<{
+    stopEarly: () => void;
+    result: Promise<{ dataUrl: string; durationSec: number }>;
+  }> {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : '';
+    const recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+    this.activeRecorder = recorder;
+
+    const chunks: BlobPart[] = [];
+    const startedAt = performance.now();
+
+    const result = new Promise<{ dataUrl: string; durationSec: number }>(
+      (resolve, reject) => {
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+        recorder.onerror = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          reject(new Error('שגיאה בהקלטת הסמפל'));
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          const durationSec = Math.max(
+            0.4,
+            Math.round(((performance.now() - startedAt) / 1000) * 10) / 10
+          );
+          const blob = new Blob(chunks, {
+            type: recorder.mimeType || 'audio/webm',
+          });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            if (typeof reader.result === 'string') {
+              resolve({ dataUrl: reader.result, durationSec });
+            } else {
+              reject(new Error('שגיאה בקידוד ההקלטה'));
+            }
+          };
+          reader.readAsDataURL(blob);
+        };
+      }
+    );
+
+    recorder.start();
+    const autoStopTimer = window.setTimeout(() => {
+      if (recorder.state === 'recording') {
+        recorder.stop();
+      }
+    }, maxSeconds * 1000);
+
+    return {
+      stopEarly: () => {
+        window.clearTimeout(autoStopTimer);
+        if (recorder.state === 'recording') {
+          recorder.stop();
+        }
+      },
+      result,
+    };
+  }
+
+  public async playCustomSampleDataUrl(dataUrl: string): Promise<void> {
+    const ctx = this.ensureContext();
+    this.djFlareValue = 1.0;
+    try {
+      const res = await fetch(dataUrl);
+      const arr = await res.arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(arr);
+      const src = ctx.createBufferSource();
+      const gain = ctx.createGain();
+      src.buffer = audioBuf;
+      gain.gain.value = 0.95;
+      src.connect(gain);
+      gain.connect(this.getChainInput());
+      src.start(ctx.currentTime);
+    } catch {
+      const el = new Audio(dataUrl);
+      el.play().catch(() => {});
+    }
+  }
+
+  // --- Synthesized Musical Groove Engine ---
 
   private triggerGrooveStep(ctx: AudioContext, step: number): void {
     const now = ctx.currentTime;
@@ -478,7 +1043,6 @@ class PartyBoxAudioEngine {
     }
 
     if (this.currentGroove === 'mediterranean_112') {
-      // Darbuka / Mediterranean electronic party groove (Dum-Tek-Tek-Dum-Tek)
       if (step === 0 || step === 6 || step === 8) {
         this.synthKick(ctx, dest, now, 130, 48, 0.34);
       }
@@ -488,7 +1052,7 @@ class PartyBoxAudioEngine {
       if (step === 2 || step === 7 || step === 10 || step === 14 || step === 15) {
         this.synthHat(ctx, dest, now, 0.14);
       }
-      const scaleFreqs = [110, 116.54, 138.59, 146.83, 164.81, 174.61, 207.65]; // Hijaz A
+      const scaleFreqs = [110, 116.54, 138.59, 146.83, 164.81, 174.61, 207.65];
       if (step % 2 === 0) {
         const note = scaleFreqs[(step / 2) % scaleFreqs.length];
         this.synthPluck(ctx, dest, now, note * 2, 0.16);
@@ -505,7 +1069,7 @@ class PartyBoxAudioEngine {
       }
       if (step % 4 === 2) {
         this.synthHat(ctx, dest, now, 0.18);
-        this.synthBassNote(ctx, dest, now, 51.91, 0.22); // G#1 offbeat rolling sub
+        this.synthBassNote(ctx, dest, now, 51.91, 0.22);
       } else if (step % 2 === 1) {
         this.synthHat(ctx, dest, now, 0.06);
       }
@@ -519,7 +1083,6 @@ class PartyBoxAudioEngine {
       return;
     }
 
-    // Default: house_124 (Stage 320 Signature Party House)
     if (step % 4 === 0) {
       this.synthKick(ctx, dest, now, 145, 45, 0.36);
     }
@@ -545,7 +1108,13 @@ class PartyBoxAudioEngine {
 
     if (step === 0 || step === 6 || step === 12) {
       const chordRoot = step === 6 ? 261.63 : 220;
-      this.synthChordStab(ctx, dest, now, [chordRoot, chordRoot * 1.189, chordRoot * 1.498], 0.12);
+      this.synthChordStab(
+        ctx,
+        dest,
+        now,
+        [chordRoot, chordRoot * 1.189, chordRoot * 1.498],
+        0.12
+      );
     }
   }
 
@@ -817,12 +1386,42 @@ class PartyBoxAudioEngine {
     }
   }
 
-  // --- Real-Time Analysis Frame ---
+  // --- Real-Time Analysis Frame & Live Voice Ducking ---
 
   public getAnalysisFrame(): AudioAnalysisFrame {
     this.djFlareValue = Math.max(0, this.djFlareValue * 0.9);
 
-    if (!this.analyser || !this.freqData || (!this.isPlaying && this.djFlareValue < 0.02)) {
+    // Measure live karaoke vocal level & drive automatic MC Ducking
+    if (this.karaokeActive && this.karaokeAnalyser && this.karaokeTimeData && this.ctx) {
+      this.karaokeAnalyser.getByteTimeDomainData(this.karaokeTimeData);
+      let sumSq = 0;
+      for (let i = 0; i < this.karaokeTimeData.length; i++) {
+        const centered = (this.karaokeTimeData[i] - 128) / 128;
+        sumSq += centered * centered;
+      }
+      const rms = Math.sqrt(sumSq / this.karaokeTimeData.length);
+      this.currentVoiceRms = Math.min(1, rms * 4.5);
+
+      const nowMs = performance.now();
+      if (this.currentVoiceRms > 0.14) {
+        this.lastVoiceDetectedMs = nowMs;
+      }
+      if (this.musicDuckGain) {
+        const shouldDuck =
+          this.karaokeVocalDucking && nowMs - this.lastVoiceDetectedMs < 520;
+        this.musicDuckGain.gain.setTargetAtTime(
+          shouldDuck ? 0.3 : 1.0,
+          this.ctx.currentTime,
+          shouldDuck ? 0.04 : 0.22
+        );
+      }
+    }
+
+    if (
+      !this.analyser ||
+      !this.freqData ||
+      (!this.isPlaying && !this.karaokeActive && this.djFlareValue < 0.02)
+    ) {
       return {
         spectrum: new Array(28).fill(0.03),
         subBassEnergy: this.djFlareValue * 0.8,
@@ -830,34 +1429,31 @@ class PartyBoxAudioEngine {
         highEnergy: this.djFlareValue * 0.6,
         isBeat: this.djFlareValue > 0.7,
         djFlare: this.djFlareValue,
+        karaokeVoiceLevel: this.currentVoiceRms,
       };
     }
 
     this.analyser.getByteFrequencyData(this.freqData);
-    const binCount = this.freqData.length; // 128 bins
+    const binCount = this.freqData.length;
 
-    // Sub-bass & bass energy (bins 1..8)
     let bassSum = 0;
     for (let i = 1; i <= 7; i++) {
       bassSum += this.freqData[i];
     }
     const subBassEnergy = Math.min(1, bassSum / (7 * 235));
 
-    // Mid energy (bins 8..36)
     let midSum = 0;
     for (let i = 8; i <= 36; i++) {
       midSum += this.freqData[i];
     }
     const midEnergy = Math.min(1, midSum / (29 * 210));
 
-    // High energy (bins 37..95)
     let highSum = 0;
     for (let i = 37; i <= 95; i++) {
       highSum += this.freqData[i];
     }
     const highEnergy = Math.min(1, highSum / (59 * 180));
 
-    // Beat onset detection
     const nowMs = performance.now();
     const delta = subBassEnergy - this.prevBassAvg;
     const isBeat =
@@ -868,7 +1464,6 @@ class PartyBoxAudioEngine {
     }
     this.prevBassAvg = this.prevBassAvg * 0.82 + subBassEnergy * 0.18;
 
-    // 28 logarithmically mapped spectrum bars
     const bars: number[] = [];
     for (let b = 0; b < 28; b++) {
       const t0 = Math.pow(b / 28, 1.75);
@@ -886,10 +1481,11 @@ class PartyBoxAudioEngine {
     return {
       spectrum: bars,
       subBassEnergy: Math.max(subBassEnergy, this.djFlareValue * 0.75),
-      midEnergy,
+      midEnergy: Math.max(midEnergy, this.currentVoiceRms * 0.65),
       highEnergy,
       isBeat,
       djFlare: this.djFlareValue,
+      karaokeVoiceLevel: this.currentVoiceRms,
     };
   }
 }

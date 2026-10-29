@@ -130,7 +130,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
       aria-modal="true"
       aria-labelledby="connection-modal-title"
     >
-      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-[#1E2738] sm:rounded-2xl">
+      <div className="neon-surface max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-[#1E2738] sm:rounded-2xl">
         {/* Mobile drag handle */}
         <div className="mx-auto mb-4 h-1.5 w-10 rounded-full bg-slate-300 dark:bg-slate-600 sm:hidden" />
 
@@ -201,6 +201,10 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
               <span aria-hidden="true">·</span>
               <span>
                 שמע ומיקרופון: <strong>{permState.microphone ? 'מאושר' : 'זמין'}</strong>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                התראות שליטה: <strong>{permState.notifications ? 'מאושר' : 'זמין'}</strong>
               </span>
             </div>
 

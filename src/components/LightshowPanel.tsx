@@ -30,7 +30,7 @@ const ZONE_ITEMS: Array<{
   {
     key: 'strobeTop',
     title: 'מבזק סטרוב עליון',
-    subtitle: 'פס הבזקים לבן בעוצמה גבוהה מעל מערך הטוויטרים',
+    subtitle: 'פס הבזקים בעוצמה גבוהה מעל מערך הטוויטרים',
   },
   {
     key: 'strobeBottom',
@@ -68,28 +68,44 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
     });
   };
 
+  const isNeonActive =
+    lightshow.enabled && lightshow.preset === LightshowPresetId.Neon;
+
   return (
     <div className="space-y-6">
-      {/* Section 1: Master Lightshow Header & Power */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      {/* Section 1: Master Lightshow Header, Neon Quick Trigger & Power */}
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-white">
-              סטודיו תאורת מופע (Lightshow)
+              סטודיו תאורת מופע וניאון (Lightshow)
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              שליטה מלאה על דפוסי תנועה, אזורי הארה פיזיים, צבעוניות דו-גוונית וסנכרון לקצב הבס.
+              שליטה מלאה על תאורת ניאון זוהרת, דפוסי תנועה, אזורי הארה פיזיים וסנכרון חי לקצב הבס.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
+              onClick={() => onSelectPreset(LightshowPresetId.Neon, true)}
+              className={`flex min-h-[44px] items-center gap-2 rounded-xl border px-4 py-2 text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                isNeonActive
+                  ? 'border-cyan-400 bg-gradient-to-l from-cyan-500/20 to-fuchsia-500/20 text-cyan-900 shadow-[0_0_18px_rgba(0,240,255,0.28)] dark:text-cyan-200'
+                  : 'border-cyan-400/50 bg-cyan-50/50 text-cyan-800 hover:bg-cyan-100/60 dark:border-cyan-400/40 dark:bg-[#141B27] dark:text-cyan-300'
+              }`}
+            >
+              <Sparkles className="h-4 w-4 text-cyan-500 dark:text-cyan-400" />
+              <span>תאורת ניאון יפה</span>
+            </button>
+
+            <button
+              type="button"
               onClick={onResetLightshow}
               className="flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-[#141B27] dark:text-slate-300 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              <span>איפוס ברירת מחדל</span>
+              <span>איפוס</span>
             </button>
 
             <button
@@ -111,10 +127,10 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
         <div className="mt-6 flex flex-col gap-4 border-t border-slate-200/80 pt-5 dark:border-slate-700/60 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-medium text-slate-900 dark:text-white">
-              סנכרון דינמי לקצב המוזיקה (Beat-Sync)
+              סנכרון דינמי לקצב המוזיקה והחדר (Beat-Sync)
             </div>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              מתאים אוטומטית את מהירות הטבעות והבזקי הסטרוב להתקפי תדר הסאב-בס בזמן אמת
+              מתאים אוטומטית את מהירות הטבעות והבזקי הניאון להתקפי הסאב-בס ולמוזיקה החיה במיקרופון
             </p>
           </div>
 
@@ -135,12 +151,12 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
         </div>
       </section>
 
-      {/* Section 2: 6 Authentic JBL Lightshow Modes */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      {/* Section 2: 7 Lightshow Modes (Including Neon Glow!) */}
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
           <div>
             <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-              01. מצבי אפקט ותנועה
+              01. מצבי אפקט ותאורת ניאון
             </h3>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
               בחר את אופי הזרימה על פני שמיניית התאורה של ה-PartyBox 320
@@ -157,14 +173,17 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {presetEntries.map(([id, info]) => {
             const isSelected = lightshow.preset === id;
+            const isNeonItem = id === LightshowPresetId.Neon;
             return (
               <button
                 key={id}
                 type="button"
-                onClick={() => onSelectPreset(id, false)}
-                className={`group flex flex-col justify-between rounded-xl border p-4 text-right transition-colors cursor-pointer ${
+                onClick={() => onSelectPreset(id, isNeonItem)}
+                className={`group flex flex-col justify-between rounded-xl border p-4 text-right transition-all cursor-pointer ${
                   isSelected
-                    ? 'border-[#D95B2B] bg-[#D95B2B]/[0.07] dark:bg-[#D95B2B]/[0.12]'
+                    ? isNeonItem
+                      ? 'border-cyan-400 bg-gradient-to-l from-cyan-500/15 to-fuchsia-500/15 shadow-[0_0_16px_rgba(0,240,255,0.2)]'
+                      : 'border-[#D95B2B] bg-[#D95B2B]/[0.07] dark:bg-[#D95B2B]/[0.12]'
                     : 'border-slate-200 bg-slate-50/70 hover:border-slate-300 hover:bg-slate-100/80 dark:border-slate-700 dark:bg-[#141B27] dark:hover:border-slate-600'
                 }`}
               >
@@ -190,11 +209,11 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
       </section>
 
       {/* Section 3: Color Palette & Dual Gradient Customizer */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-              02. פלטת צבעים ומיזוג גוונים
+              02. פלטת צבעים ומיזוג גווני ניאון
             </h3>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
               שילוב דו-צבעי לטבעת העליונה והתחתונה או בחירה חופשית מתוך בורר הצבעים
@@ -211,7 +230,6 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
           </button>
         </div>
 
-        {/* Curated Swatches */}
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
           {COLOR_SWATCH_PAIRS.map((pair) => {
             const active =
@@ -223,6 +241,7 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
                 type="button"
                 onClick={() =>
                   onUpdateLightshow({
+                    enabled: true,
                     primaryColor: pair.primary,
                     secondaryColor: pair.secondary,
                   })
@@ -246,14 +265,16 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
           })}
         </div>
 
-        {/* Custom Color Pickers */}
         <div className="mt-5 grid grid-cols-1 gap-4 border-t border-slate-200/80 pt-5 dark:border-slate-700/60 sm:grid-cols-2">
           <label className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 cursor-pointer dark:border-slate-700 dark:bg-[#141B27]">
             <div>
               <div className="text-xs font-medium text-slate-900 dark:text-white">
                 גוון טבעת ראשי
               </div>
-              <div className="mt-0.5 font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums" dir="ltr">
+              <div
+                className="mt-0.5 font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums"
+                dir="ltr"
+              >
                 {lightshow.primaryColor.toUpperCase()}
               </div>
             </div>
@@ -271,7 +292,10 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
               <div className="text-xs font-medium text-slate-900 dark:text-white">
                 גוון משני ומעברים
               </div>
-              <div className="mt-0.5 font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums" dir="ltr">
+              <div
+                className="mt-0.5 font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums"
+                dir="ltr"
+              >
                 {lightshow.secondaryColor.toUpperCase()}
               </div>
             </div>
@@ -287,20 +311,22 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
       </section>
 
       {/* Section 4: Intensity, Speed, Strobe & 5 Hardware Zones */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
+      <section className="neon-surface rounded-2xl border border-slate-200/90 bg-white p-6 transition-colors dark:border-slate-700/70 dark:bg-[#1E2738]">
         <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
           03. עוצמה, מהירות ואזורי תאורה פיזיים
         </h3>
 
         <div className="mt-5 grid grid-cols-1 gap-6 md:grid-cols-3">
-          {/* Brightness */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200">
                 <Sun className="h-3.5 w-3.5 text-[#D95B2B]" />
                 <span>בהירות כללית</span>
               </span>
-              <span className="font-mono text-slate-600 dark:text-slate-300 tabular-nums" dir="ltr">
+              <span
+                className="font-mono text-slate-600 dark:text-slate-300 tabular-nums"
+                dir="ltr"
+              >
                 {lightshow.brightness}%
               </span>
             </div>
@@ -315,14 +341,16 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
             />
           </div>
 
-          {/* Animation Speed */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200">
                 <Sparkles className="h-3.5 w-3.5 text-[#D95B2B]" />
                 <span>מהירות תנועה</span>
               </span>
-              <span className="font-mono text-slate-600 dark:text-slate-300 tabular-nums" dir="ltr">
+              <span
+                className="font-mono text-slate-600 dark:text-slate-300 tabular-nums"
+                dir="ltr"
+              >
                 {lightshow.speed.toFixed(1)}x
               </span>
             </div>
@@ -337,14 +365,16 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
             />
           </div>
 
-          {/* Strobe Rate */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200">
                 <Zap className="h-3.5 w-3.5 text-[#D95B2B]" />
                 <span>תדירות מבזק סטרוב</span>
               </span>
-              <span className="font-mono text-slate-600 dark:text-slate-300 tabular-nums" dir="ltr">
+              <span
+                className="font-mono text-slate-600 dark:text-slate-300 tabular-nums"
+                dir="ltr"
+              >
                 {lightshow.strobeIntensity}%
               </span>
             </div>
@@ -354,13 +384,14 @@ export const LightshowPanel: React.FC<LightshowPanelProps> = ({
               max={100}
               step={5}
               value={lightshow.strobeIntensity}
-              onChange={(e) => onUpdateLightshow({ strobeIntensity: Number(e.target.value) })}
+              onChange={(e) =>
+                onUpdateLightshow({ strobeIntensity: Number(e.target.value) })
+              }
               className="jbl-slider w-full"
             />
           </div>
         </div>
 
-        {/* 5 Individual Hardware Zones */}
         <div className="mt-7 border-t border-slate-200/80 pt-6 dark:border-slate-700/60">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <span className="text-sm font-medium text-slate-900 dark:text-white">
