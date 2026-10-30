@@ -1,0 +1,8 @@
+{
+  "model": "JBL PartyBox Stage 320",
+  "latestVersion": "2.7.0",
+  "releaseDate": "2026-10",
+  "sizeBytes": 1884160,
+  "minBatteryPercent": 20,
+  "changelogHe": "• סנכרון תאורה דו-כיווני מהיר יותר מול BLE GATT ו-RFCOMM SPP ללא השהיה.\n• שיפור תגובת Beat Sync לקצב שירים מתנגנים ודיוק 5 אזורי ה-LED.\n• יציבות מוגברת בחיבור Auracast / סטריאו וניהול סוללה חכם."
+}

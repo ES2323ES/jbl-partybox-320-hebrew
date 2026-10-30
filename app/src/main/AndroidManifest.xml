@@ -11,18 +11,36 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Audio Equalizer & Local Music Library permissions -->
+    <!-- Global Hardware Audio Equalizer & Media Control (Zero file/storage permissions!) -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- Network & GitHub Releases Auto-Update APK installation -->
+    <!-- Network & GitHub Releases / Speaker Firmware OTA Updates -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <!-- Package visibility for launching & detecting any external music app on Android 11+ -->
+    <queries>
+        <package android:name="com.spotify.music" />
+        <package android:name="com.google.android.apps.youtube.music" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.apple.android.music" />
+        <package android:name="com.soundcloud.android" />
+        <package android:name="deezer.android.app" />
+        <package android:name="org.videolan.vlc" />
+        <package android:name="com.sec.android.app.music" />
+        <package android:name="org.telegram.messenger" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.APP_MUSIC" />
+        </intent>
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -44,6 +62,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Universal External Media Session Listener (Spotify, YouTube Music, Apple Music, etc.) -->
+        <service
+            android:name="com.jblpartybox320.hebrewcontrol.player.MediaSessionListenerService"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <provider
             android:name="com.jblpartybox320.hebrewcontrol.update.ApkUpdateFileProvider"

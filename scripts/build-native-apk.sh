@@ -60,8 +60,8 @@ sed 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android">|<ma
   --java "$BUILD_TMP/gen" \
   --min-sdk-version 24 \
   --target-sdk-version 34 \
-  --version-code 5 \
-  --version-name "0.3.0" \
+  --version-code 6 \
+  --version-name "0.4.0" \
   -o "$BUILD_TMP/unsigned-unaligned.apk" \
   "$BUILD_TMP/compiled_res/res.zip"
 
@@ -145,8 +145,8 @@ apk_sha = hashlib.sha256(apk_bytes).hexdigest()
 meta = {
     'appName': 'JBL PartyBox 320',
     'packageName': 'com.jblpartybox320.hebrewcontrol',
-    'versionName': '0.3.0',
-    'versionCode': 5,
+    'versionName': '0.4.0',
+    'versionCode': 6,
     'architecture': '100% Native Android (Java 17 + Vector SVG)',
     'developer': 'אש התורה',
     'minSdk': 24,

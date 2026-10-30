@@ -1,14 +1,14 @@
 {
   "appName": "JBL PartyBox 320",
   "packageName": "com.jblpartybox320.hebrewcontrol",
-  "versionName": "0.3.0",
-  "versionCode": 5,
+  "versionName": "0.4.0",
+  "versionCode": 6,
   "architecture": "100% Native Android (Java 17 + Vector SVG)",
   "developer": "אש התורה",
   "minSdk": 24,
   "targetSdk": 34,
-  "apkSizeBytes": 75819,
-  "zipSizeBytes": 70833,
-  "sha256": "699fbb6aa2cc243bbd375c41867201f7e8b2ee5c5dded5e83ae3b874301630d2",
-  "builtAt": "2026-10-30T10:54:41.543227+00:00"
+  "apkSizeBytes": 96344,
+  "zipSizeBytes": 89448,
+  "sha256": "49c91672b1f818f279b5eeb34798f84e9e65a6712f6b88afd5f68253ffec9a39",
+  "builtAt": "2026-10-30T12:02:20.473973+00:00"
 }

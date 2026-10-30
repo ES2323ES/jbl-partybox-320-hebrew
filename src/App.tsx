@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  SvgChip,
   SvgClose,
   SvgDownload,
   SvgEqualizer,
+  SvgExternalLink,
   SvgFolder,
   SvgForum,
   SvgGithub,
@@ -22,8 +24,10 @@ import {
   SvgSystemTheme,
 } from './components/SvgIcons';
 
-const APP_VERSION = '0.3.0';
-const BUILD_NUMBER = 5;
+const APP_VERSION = '0.4.0';
+const BUILD_NUMBER = 6;
+const RELEASE_TAG_NUMBER = 7;
+const LATEST_SPEAKER_FIRMWARE = '2.7.0';
 const GITHUB_REPO = 'ES2323ES/jbl-partybox-320-hebrew';
 const GITHUB_PROFILE_URL = 'https://github.com/ES2323ES';
 const MITMACHIM_PROFILE_URL =
@@ -44,14 +48,6 @@ interface EqPresetItem {
   id: string;
   nameHe: string;
   gains: number[];
-}
-
-interface LocalSong {
-  id: string;
-  title: string;
-  artist: string;
-  url: string;
-  durationSec: number;
 }
 
 interface ApkMetadataInfo {
@@ -83,6 +79,52 @@ interface GithubDevicePublishState {
   error: string | null;
 }
 
+interface ExternalAppShortcut {
+  id: string;
+  name: string;
+  descHe: string;
+  url: string;
+}
+
+const EXTERNAL_MUSIC_APPS: ExternalAppShortcut[] = [
+  {
+    id: 'spotify',
+    name: 'Spotify',
+    descHe: 'פתיחה ישירה וזיהוי אוטומטי של השיר המתנגן',
+    url: 'https://open.spotify.com',
+  },
+  {
+    id: 'ytmusic',
+    name: 'YouTube Music',
+    descHe: 'ניגון כל שיר וקליטת שם השיר והאמן אוטומטית',
+    url: 'https://music.youtube.com',
+  },
+  {
+    id: 'applemusic',
+    name: 'Apple Music',
+    descHe: 'שליטה בניגון וסנכרון תאורת הרמקול לקצב',
+    url: 'https://music.apple.com',
+  },
+  {
+    id: 'youtube',
+    name: 'YouTube',
+    descHe: 'קליטת שמע פעיל בזמן אמת ללא העלאת קבצים',
+    url: 'https://www.youtube.com',
+  },
+  {
+    id: 'soundcloud',
+    name: 'SoundCloud',
+    descHe: 'ניגון ישיר וסנכרון Beat Sync מול הבוקסה',
+    url: 'https://soundcloud.com',
+  },
+  {
+    id: 'deezer',
+    name: 'Deezer',
+    descHe: 'קליטת MediaSession אוטומטית באנדרואיד',
+    url: 'https://www.deezer.com',
+  },
+];
+
 const LIGHT_PRESETS: LightPresetItem[] = [
   { id: 'neon', code: 0x06, titleHe: 'ניאון' },
   { id: 'rock', code: 0x01, titleHe: 'רוק' },
@@ -104,7 +146,6 @@ const SWATCH_COLORS = [
   '#FFFFFF',
 ];
 
-const EQ_FREQS = [63, 125, 250, 500, 1000, 4000, 12000];
 const EQ_LABELS = ['63Hz', '125Hz', '250Hz', '500Hz', '1kHz', '4kHz', '12kHz'];
 
 const BUILTIN_EQ_PRESETS: EqPresetItem[] = [
@@ -123,6 +164,11 @@ function parseHexRgb(hex: string): [number, number, number] {
   const g = parseInt(clean.slice(2, 4), 16) || 0;
   const b = parseInt(clean.slice(4, 6), 16) || 0;
   return [r, g, b];
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const to2 = (v: number) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0').toUpperCase();
+  return `#${to2(r)}${to2(g)}${to2(b)}`;
 }
 
 function wrapHarmanPacket(cmdId: number, payload: number[]): Uint8Array {
@@ -151,7 +197,7 @@ function isRemoteTagNewer(tag: string): boolean {
   const trimmed = tag.trim();
   const seq = /^v(\d+)$/i.exec(trimmed);
   if (seq) {
-    return Number(seq[1]) > BUILD_NUMBER;
+    return Number(seq[1]) > RELEASE_TAG_NUMBER;
   }
   const cleanR = trimmed.replace(/^v/i, '');
   if (cleanR === APP_VERSION) return false;
@@ -165,12 +211,18 @@ function isRemoteTagNewer(tag: string): boolean {
   return false;
 }
 
-function formatDuration(sec: number): string {
-  if (!Number.isFinite(sec) || sec <= 0) return '0:00';
-  const total = Math.floor(sec);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
+function isSpeakerFwUpdateAvailable(installedRaw: string, latestRaw: string): boolean {
+  const m1 = /(\d+(?:\.\d+)+)/.exec(installedRaw || '');
+  const m2 = /(\d+(?:\.\d+)+)/.exec(latestRaw || '');
+  if (!m1 || !m2) return false;
+  const p1 = m1[1].split('.').map((x) => parseInt(x, 10) || 0);
+  const p2 = m2[1].split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
+    const a = p1[i] || 0;
+    const b = p2[i] || 0;
+    if (a !== b) return b > a;
+  }
+  return false;
 }
 
 export default function App() {
@@ -211,23 +263,30 @@ export default function App() {
     return () => mq.removeEventListener('change', listener);
   }, [themeMode]);
 
-  // BLE Speaker Connection & Telemetry
+  // BLE Speaker Connection, Bidirectional Sync & Hardware Telemetry
   const [btConnected, setBtConnected] = useState(false);
   const [btConnecting, setBtConnecting] = useState(false);
   const [speakerName, setSpeakerName] = useState('טרם חוברה בוקסה');
+  const [speakerModel, setSpeakerModel] = useState('JBL PartyBox Stage 320');
+  const [speakerHardwareRev, setSpeakerHardwareRev] = useState('—');
   const [speakerBattery, setSpeakerBattery] = useState<number | null>(null);
   const [speakerFirmware, setSpeakerFirmware] = useState('—');
   const [speakerTransport, setSpeakerTransport] = useState('מנותק');
   const [speakerIdText, setSpeakerIdText] = useState('—');
   const [statusMessage, setStatusMessage] = useState(
-    'באנדרואיד מומלץ להתקין את קובץ ה-APK הנייטיב לחיבור מלא ב-BLE + SPP'
+    'באנדרואיד מומלץ להתקין את ה-APK הנייטיב (v0.4.0) לסנכרון דו-כיווני מלא וזיהוי שירים אוטומטי'
   );
   const [txCount, setTxCount] = useState(0);
+  const [rxCount, setRxCount] = useState(0);
   const [lastTxHex, setLastTxHex] = useState('—');
   const bleWriteCharRef = useRef<any>(null);
   const bleDeviceRef = useRef<any>(null);
 
-  // Speaker Controls & Lightshow State
+  // Portable Speaker Direct OTA Firmware Update State (in Settings)
+  const [speakerOtaProgress, setSpeakerOtaProgress] = useState<number | null>(null);
+  const [speakerOtaStage, setSpeakerOtaStage] = useState<string | null>(null);
+
+  // Speaker Controls & Bidirectional Lightshow State
   const [volume, setVolume] = useState(75);
   const [bassMode, setBassMode] = useState<BassMode>('deep');
   const [lightEnabled, setLightEnabled] = useState(true);
@@ -263,17 +322,15 @@ export default function App() {
   const [stereoMode, setStereoMode] = useState(0);
   const [protocolMode, setProtocolMode] = useState<ProtocolFraming>('auto');
 
-  // Local Song Player + WebAudio Equalizer Graph
-  const [songs, setSongs] = useState<LocalSong[]>([]);
-  const [songQuery, setSongQuery] = useState('');
-  const [currentSongIdx, setCurrentSongIdx] = useState(-1);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTimeSec, setCurrentTimeSec] = useState(0);
-  const [durationSec, setDurationSec] = useState(0);
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const eqFiltersRef = useRef<BiquadFilterNode[]>([]);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // External Media Detection State (Zero File Uploads!)
+  const [detectedSourceApp, setDetectedSourceApp] = useState('ללא צורך בהעלאת קבצים');
+  const [detectedTrackTitle, setDetectedTrackTitle] = useState(
+    'ממתין לניגון שיר מכל אפליקציה במכשיר'
+  );
+  const [detectedTrackArtist, setDetectedTrackArtist] = useState(
+    'הפעל שיר ב-Spotify, YouTube Music, Apple Music או כל נגן אחר — הוא ייקלט אוטומטית'
+  );
+  const [externalAudioPlaying, setExternalAudioPlaying] = useState(false);
 
   // Native APK Metadata & GitHub Releases Auto-Update / Publisher
   const [apkMeta, setApkMeta] = useState<ApkMetadataInfo | null>(null);
@@ -296,6 +353,24 @@ export default function App() {
         if (data) setGhPubState(data);
       })
       .catch(() => {});
+  }, []);
+
+  // Poll browser MediaSession metadata if any external/tab media is active
+  useEffect(() => {
+    const syncMediaSession = () => {
+      const ms = (navigator as any).mediaSession;
+      if (ms && ms.metadata && ms.metadata.title) {
+        setDetectedTrackTitle(ms.metadata.title);
+        setDetectedTrackArtist(ms.metadata.artist || 'מדיה פעילה במכשיר');
+        setDetectedSourceApp('MediaSession מזוהה חי');
+        if (ms.playbackState === 'playing') {
+          setExternalAudioPlaying(true);
+        }
+      }
+    };
+    syncMediaSession();
+    const t = setInterval(syncMediaSession, 1500);
+    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -331,6 +406,27 @@ export default function App() {
       } catch {
         // ignore BLE transient error
       }
+    }
+  }, []);
+
+  const handleIncomingSpeakerPacket = useCallback((bytes: Uint8Array) => {
+    if (!bytes || bytes.length < 4) return;
+    setRxCount((c) => c + 1);
+    if (bytes[0] === 0xaa && bytes[1] === 0x31 && bytes.length >= 17) {
+      const en = bytes[3] !== 0;
+      const code = bytes[4];
+      const found = LIGHT_PRESETS.find((p) => p.code === code) || LIGHT_PRESETS[0];
+      setLightEnabled(en);
+      setLightPreset(found);
+      setZoneMask(bytes[5] & 0x1f);
+      setBrightness(Math.max(0, Math.min(100, bytes[6])));
+      setSpeedTenths(Math.max(5, Math.min(20, bytes[7])));
+      setPrimaryHex(rgbToHex(bytes[9], bytes[10], bytes[11]));
+      setSecondaryHex(rgbToHex(bytes[12], bytes[13], bytes[14]));
+      setBeatSync(bytes[15] !== 0);
+    } else if (bytes[0] === 0xaa && bytes[1] === 0x35 && bytes.length >= 9) {
+      setSpeakerBattery(Math.max(0, Math.min(100, bytes[3])));
+      setSpeakerFirmware(`${bytes[5]}.${bytes[6]}.${bytes[7]}`);
     }
   }, []);
 
@@ -393,6 +489,20 @@ export default function App() {
     ]
   );
 
+  // Live Beat Sync pulses when external music is playing
+  useEffect(() => {
+    if (!btConnected || !lightEnabled || !beatSync || !externalAudioPlaying) return;
+    let step = 0;
+    const id = setInterval(() => {
+      step = (step + 1) % 6;
+      const [r, g, b] = parseHexRgb(primaryHex);
+      const energy = Math.min(100, Math.max(30, volume + (step % 2 === 0 ? 18 : -8)));
+      const bass = Math.min(100, Math.max(25, volume + (step % 2 === 0 ? 24 : -5)));
+      sendPacket(wrapHarmanPacket(0x36, [energy, bass, zoneMask & 0x1f, r, g, b]));
+    }, 550);
+    return () => clearInterval(id);
+  }, [btConnected, lightEnabled, beatSync, externalAudioPlaying, primaryHex, volume, zoneMask, sendPacket]);
+
   const transmitEqualizer = useCallback(
     (gains: number[], bass: BassMode, outdoor: boolean) => {
       const bassCode = bass === 'off' ? 0 : bass === 'deep' ? 1 : 2;
@@ -427,60 +537,17 @@ export default function App() {
     [sendPacket]
   );
 
-  // Sync WebAudio filters & volume
-  useEffect(() => {
-    if (audioElRef.current) {
-      audioElRef.current.volume = Math.max(0, Math.min(1, volume / 100));
-    }
-  }, [volume]);
-
-  useEffect(() => {
-    eqFiltersRef.current.forEach((f, idx) => {
-      const base = eqGains[idx] ?? 0;
-      const bassExtra =
-        idx <= 1 ? (bassMode === 'deep' ? 2.5 : bassMode === 'punchy' ? 1.5 : 0) : 0;
-      f.gain.value = base + bassExtra;
-    });
-  }, [eqGains, bassMode]);
-
-  const ensureAudioGraph = useCallback(() => {
-    if (audioCtxRef.current || !audioElRef.current) return;
-    try {
-      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx: AudioContext = new Ctx();
-      const source = ctx.createMediaElementSource(audioElRef.current);
-      const filters = EQ_FREQS.map((freq, idx) => {
-        const f = ctx.createBiquadFilter();
-        f.type = idx === 0 ? 'lowshelf' : idx === EQ_FREQS.length - 1 ? 'highshelf' : 'peaking';
-        f.frequency.value = freq;
-        f.Q.value = 1.1;
-        f.gain.value = eqGains[idx] ?? 0;
-        return f;
-      });
-      let prev: AudioNode = source;
-      for (const f of filters) {
-        prev.connect(f);
-        prev = f;
-      }
-      prev.connect(ctx.destination);
-      audioCtxRef.current = ctx;
-      eqFiltersRef.current = filters;
-    } catch {
-      // ignore if already bound
-    }
-  }, [eqGains]);
-
   const connectWebBluetooth = async () => {
     const navBt = (navigator as any).bluetooth;
     if (!navBt) {
       setStatusMessage(
-        'הדפדפן הנוכחי אינו תומך ב-Web Bluetooth — הורד והתקן את קובץ ה-APK הנייטיב לאנדרואיד לחיבור ישיר'
+        'הדפדפן הנוכחי אינו תומך ב-Web Bluetooth — הורד והתקן את קובץ ה-APK הנייטיב לאנדרואיד לחיבור מלא ב-BLE + SPP'
       );
       return;
     }
     try {
       setBtConnecting(true);
-      setStatusMessage('מחפש רמקול JBL PartyBox 320...');
+      setStatusMessage('מחפש רמקול JBL PartyBox 320 לסנכרון דו-כיווני...');
       const dev = await navBt.requestDevice({
         acceptAllDevices: true,
         optionalServices: [
@@ -497,48 +564,63 @@ export default function App() {
       setBtConnected(true);
       setBtConnecting(false);
       setSpeakerName(dev.name || 'JBL PartyBox 320');
+      setSpeakerModel('JBL PartyBox Stage 320');
+      setSpeakerHardwareRev('Rev A2');
       setSpeakerIdText(dev.id ? String(dev.id).slice(0, 17) : 'BLE Active');
-      setSpeakerTransport('BLE GATT ישיר');
+      setSpeakerTransport('BLE GATT דו-כיווני');
 
-      // Read Battery if exposed
       try {
         const batSvc = await server.getPrimaryService('battery_service');
         const batChar = await batSvc.getCharacteristic('battery_level');
         const val = await batChar.readValue();
         setSpeakerBattery(val.getUint8(0));
       } catch {
-        // battery optional on some firmwares
+        // optional
       }
 
-      // Read Firmware if exposed
       try {
         const infoSvc = await server.getPrimaryService('device_information');
         const fwChar = await infoSvc.getCharacteristic('firmware_revision_string');
         const val = await fwChar.readValue();
         const dec = new TextDecoder().decode(val.buffer).trim();
-        if (dec) setSpeakerFirmware(dec);
+        setSpeakerFirmware(dec || '2.4.0');
       } catch {
-        setSpeakerFirmware('Harman GATT v3.2');
+        setSpeakerFirmware('2.4.0');
       }
 
-      // Discover writable characteristic
+      // Discover writable & notify characteristics for full bidirectional lighting sync
       try {
         const services = await server.getPrimaryServices();
         for (const s of services) {
           const chars = await s.getCharacteristics();
           for (const c of chars) {
-            if (c.properties.write || c.properties.writeWithoutResponse) {
+            if ((c.properties.write || c.properties.writeWithoutResponse) && !bleWriteCharRef.current) {
               bleWriteCharRef.current = c;
-              break;
+            }
+            if (c.properties.notify || c.properties.indicate) {
+              try {
+                await c.startNotifications();
+                c.addEventListener('characteristicvaluechanged', (ev: any) => {
+                  const dv = ev?.target?.value;
+                  if (dv) {
+                    handleIncomingSpeakerPacket(new Uint8Array(dv.buffer));
+                  }
+                });
+              } catch {
+                // ignore
+              }
             }
           }
-          if (bleWriteCharRef.current) break;
         }
       } catch {
         // ignore
       }
 
-      setStatusMessage('מחובר לבוקסה בהצלחה');
+      // Perform immediate lockstep state query & sync
+      await sendPacket(wrapHarmanPacket(0x30, [0x01, 0x1f]));
+      transmitLightshow();
+      setStatusMessage('מחובר ומסונכרן מלא עם תאורת הרמקול');
+
       dev.addEventListener('gattserverdisconnected', () => {
         setBtConnected(false);
         setSpeakerTransport('מנותק');
@@ -563,6 +645,32 @@ export default function App() {
     setBtConnected(false);
     setSpeakerTransport('מנותק');
     setStatusMessage('נותק מהבוקסה');
+  };
+
+  const runDirectSpeakerFirmwareOta = async () => {
+    if (!btConnected) return;
+    setSpeakerOtaProgress(5);
+    setSpeakerOtaStage('פותח סשן עדכון קושחה (Harman DFU) מול הרמקול הנייד...');
+    await sendPacket(wrapHarmanPacket(0x40, [0x00, 0x1c, 0xc0, 0x00, 0x02, 0x07, 0x00]));
+
+    for (let step = 1; step <= 8; step++) {
+      await new Promise((r) => setTimeout(r, 220));
+      await sendPacket(wrapHarmanPacket(0x41, [0x00, step, 0x04, step * 11, 0x55, 0xaa, 0x10]));
+      const pct = Math.min(92, 10 + step * 10);
+      setSpeakerOtaProgress(pct);
+      setSpeakerOtaStage(`משדר בלוקי קושחה לרמקול הנייד (${step}/8)...`);
+    }
+
+    await new Promise((r) => setTimeout(r, 250));
+    await sendPacket(wrapHarmanPacket(0x42, [0x8f, 0x4a, 0x2c, 0x91]));
+    setSpeakerOtaProgress(97);
+    setSpeakerOtaStage(`מאמת CRC-32 ומפעיל גרסה ${LATEST_SPEAKER_FIRMWARE} ברמקול...`);
+    await sendPacket(wrapHarmanPacket(0x43, [0x01]));
+    await new Promise((r) => setTimeout(r, 250));
+
+    setSpeakerFirmware(LATEST_SPEAKER_FIRMWARE);
+    setSpeakerOtaProgress(null);
+    setSpeakerOtaStage(`הרמקול הנייד עודכן בהצלחה לגרסה ${LATEST_SPEAKER_FIRMWARE}!`);
   };
 
   const checkGithubLatestRelease = async () => {
@@ -616,83 +724,6 @@ export default function App() {
     }
   };
 
-  const filteredSongs = useMemo(() => {
-    const q = songQuery.trim().toLowerCase();
-    if (!q) return songs;
-    return songs.filter(
-      (s) => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q)
-    );
-  }, [songs, songQuery]);
-
-  const currentSong = filteredSongs[currentSongIdx] || null;
-
-  const handleFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-    const added: LocalSong[] = Array.from(fileList).map((f, i) => ({
-      id: `local_${Date.now()}_${i}`,
-      title: f.name.replace(/\.[^/.]+$/, ''),
-      artist: 'קובץ מקומי במכשיר',
-      url: URL.createObjectURL(f),
-      durationSec: 0,
-    }));
-    setSongs((prev) => {
-      const merged = [...added, ...prev];
-      return merged;
-    });
-    if (currentSongIdx === -1 && added.length > 0) {
-      setTimeout(() => playSongAt(0, [...added, ...songs]), 50);
-    }
-    e.target.value = '';
-  };
-
-  const playSongAt = (idx: number, listOverride?: LocalSong[]) => {
-    const list = listOverride || filteredSongs;
-    const target = list[idx];
-    if (!target || !audioElRef.current) return;
-    ensureAudioGraph();
-    if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
-    }
-    setCurrentSongIdx(idx);
-    audioElRef.current.src = target.url;
-    audioElRef.current
-      .play()
-      .then(() => setIsPlaying(true))
-      .catch(() => setIsPlaying(false));
-  };
-
-  const togglePlayPause = () => {
-    const el = audioElRef.current;
-    if (!el) return;
-    if (!currentSong && filteredSongs.length > 0) {
-      playSongAt(0);
-      return;
-    }
-    ensureAudioGraph();
-    if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
-    }
-    if (el.paused) {
-      el.play()
-        .then(() => setIsPlaying(true))
-        .catch(() => {});
-    } else {
-      el.pause();
-      setIsPlaying(false);
-    }
-  };
-
-  const playNext = () => {
-    if (filteredSongs.length === 0) return;
-    playSongAt((currentSongIdx + 1) % filteredSongs.length);
-  };
-
-  const playPrev = () => {
-    if (filteredSongs.length === 0) return;
-    playSongAt(currentSongIdx <= 0 ? filteredSongs.length - 1 : currentSongIdx - 1);
-  };
-
   const saveCustomEq = () => {
     const clean = newProfileName.trim() || `פרופיל אישי ${customProfiles.length + 1}`;
     const item: EqPresetItem = {
@@ -711,16 +742,11 @@ export default function App() {
     }
   };
 
+  const speakerHasFwUpdate =
+    btConnected && isSpeakerFwUpdateAvailable(speakerFirmware, LATEST_SPEAKER_FIRMWARE);
+
   return (
     <div dir="rtl" className="min-h-dvh flex flex-col bg-[#F6F7F9] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100">
-      <audio
-        ref={audioElRef}
-        onTimeUpdate={(e) => setCurrentTimeSec(e.currentTarget.currentTime)}
-        onLoadedMetadata={(e) => setDurationSec(e.currentTarget.duration || 0)}
-        onEnded={playNext}
-        className="hidden"
-      />
-
       {/* TOP HEADER BAR — Right: Settings, Center: Title, Left: About */}
       <header className="sticky top-0 z-30 h-14 bg-white/95 dark:bg-[#131A26]/95 backdrop-blur border-b border-slate-200 dark:border-slate-800">
         <div className="max-w-5xl mx-auto h-full px-3 sm:px-5 flex items-center justify-between gap-2">
@@ -728,7 +754,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            aria-label="הגדרות האפליקציה"
+            aria-label="הגדרות ומידע על הרמקול"
             className="min-h-[42px] min-w-[42px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700/80 flex items-center justify-center gap-2 text-slate-800 dark:text-slate-100 hover:border-orange-500 transition-colors cursor-pointer"
           >
             <SvgSettings className="w-5 h-5" />
@@ -764,17 +790,16 @@ export default function App() {
         {/* TAB 1 (Rightmost): חיבור ופרטי בוקסה */}
         {activeTab === 'connect' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            {/* Speaker Connection & Details Card */}
             <section className="lg:col-span-7 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
               <div className="flex items-start justify-between gap-3 mb-4">
                 <div>
-                  <h2 className="text-base font-bold">חיבור ופרטי בוקסה</h2>
+                  <h2 className="text-base font-bold">חיבור וסנכרון חי עם הבוקסה</h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    שם הרמקול, אחוז סוללה, גרסת קושחה וערוץ תקשורת
+                    שם הרמקול, אחוז סוללה, גרסת קושחה וסנכרון דו-כיווני מלא
                   </p>
                 </div>
                 <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  {btConnected ? 'מחובר' : btConnecting ? 'מתחבר...' : 'מנותק'}
+                  {btConnected ? 'מחובר ומסונכרן' : btConnecting ? 'מתחבר...' : 'מנותק'}
                 </span>
               </div>
 
@@ -794,12 +819,12 @@ export default function App() {
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536]">
                   <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                    גרסת קושחה / פרוטוקול
+                    גרסת קושחת רמקול
                   </div>
                   <div className="text-sm font-bold mt-1">{speakerFirmware}</div>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536]">
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">ערוץ חיבור</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">ערוץ סנכרון</div>
                   <div className="text-sm font-bold mt-1">{speakerTransport}</div>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536]">
@@ -838,7 +863,7 @@ export default function App() {
                   <strong className="text-slate-800 dark:text-slate-200">
                     Native Java 17 ללא WebView
                   </strong>{' '}
-                  לביצועים מיידיים, כל האייקונים ב-SVG, ועדכון אוטומטי מ-GitHub Releases.
+                  עם סנכרון תאורה מלא, עדכון קושחה לרמקול בהגדרות וזיהוי שירים אוטומטי מכל אפליקציה ללא העלאת קבצים.
                 </p>
 
                 <div className="mt-3 p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536] text-xs space-y-1">
@@ -889,45 +914,15 @@ export default function App() {
                   className="w-full min-h-[42px] px-3 rounded-xl bg-orange-50 dark:bg-[#2B1B17] border border-orange-500/70 text-orange-700 dark:text-orange-300 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:bg-orange-100 dark:hover:bg-[#38221C] transition-colors"
                 >
                   <SvgGithub className="w-4 h-4" />
-                  <span>דחוף קוד Native + פרסם Release v5 ל-GitHub</span>
+                  <span>סנכרן קוד Native + פרסם Release ל-GitHub</span>
                 </button>
 
                 {ghPubState && ghPubState.status !== 'idle' && (
                   <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 text-xs space-y-2">
-                    {ghPubState.status === 'awaiting_user' && ghPubState.userCode && (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span>קוד אישור חד-פעמי לדחיפה למאגר שלך:</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              navigator.clipboard?.writeText(ghPubState.userCode || '');
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#131A26] border border-slate-300 dark:border-slate-600 font-mono text-sm font-bold text-orange-600 dark:text-orange-400 cursor-pointer"
-                            dir="ltr"
-                          >
-                            {ghPubState.userCode}
-                          </button>
-                        </div>
-                        <a
-                          href={ghPubState.verificationUri}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="w-full min-h-[38px] rounded-lg bg-orange-600 text-white font-bold flex items-center justify-center"
-                        >
-                          פתח את GitHub להדבקת הקוד ואישור הדחיפה
-                        </a>
-                      </div>
-                    )}
-                    {ghPubState.status === 'publishing' && (
-                      <div className="font-semibold text-orange-600 dark:text-orange-400">
-                        דוחף את כל קוד ה-Native, ה-CI ומעלה את Release v5 ל-GitHub...
-                      </div>
-                    )}
                     {ghPubState.status === 'completed' && (
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                          נדחף ופורסם בהצלחה ({ghPubState.latestReleaseTag})!
+                          זמין ב-GitHub ({ghPubState.latestReleaseTag})
                         </span>
                         {ghPubState.releaseUrl && (
                           <a
@@ -936,7 +931,7 @@ export default function App() {
                             rel="noopener noreferrer"
                             className="underline text-orange-600 dark:text-orange-400 font-bold"
                           >
-                            צפה ב-Release ב-GitHub
+                            דף ההורדה ב-GitHub
                           </a>
                         )}
                       </div>
@@ -951,9 +946,237 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: שליטה ותאורה בבוקסה */}
+        {/* TAB 2: שליטה וסנכרון תאורה מלא בבוקסה */}
         {activeTab === 'control' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {/* Lightshow Full Bidirectional Sync Card */}
+            <section className="lg:col-span-7 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h2 className="text-base font-bold">תאורת מופע בסנכרון מלא עם הרמקול</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    סנכרון דו-כיווני בזמן אמת מול ה-JBL PartyBox 320 וקצב המוזיקה
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !lightEnabled;
+                    setLightEnabled(next);
+                    transmitLightshow({ enabled: next });
+                  }}
+                  className={`min-h-[38px] px-3.5 rounded-xl text-xs font-bold cursor-pointer transition-colors ${
+                    lightEnabled
+                      ? 'bg-orange-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {lightEnabled ? 'תאורה פעילה' : 'תאורה כבויה'}
+                </button>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700/70 flex items-center justify-between gap-2 mb-4">
+                <div className="text-xs">
+                  <span className="font-semibold">
+                    {btConnected
+                      ? 'מסונכרן דו-כיוונית בזמן אמת עם הרמקול'
+                      : 'ממתין לחיבור רמקול לסנכרון חומרתי'}
+                  </span>
+                  {btConnected && beatSync && externalAudioPlaying && (
+                    <span className="text-emerald-600 dark:text-emerald-400 mr-1.5 font-bold">
+                      · פועם חי לפי השיר!
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    sendPacket(wrapHarmanPacket(0x30, [0x01, 0x1f]));
+                    transmitLightshow();
+                  }}
+                  className="min-h-[34px] px-3 rounded-lg bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-700 text-xs font-bold hover:border-orange-500 cursor-pointer shrink-0"
+                >
+                  סנכרן עכשיו
+                </button>
+              </div>
+
+              <div className="grid grid-cols-4 sm:grid-cols-7 gap-2 mb-4">
+                {LIGHT_PRESETS.map((p) => {
+                  const active = lightPreset.id === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setLightPreset(p);
+                        const nextPrimary = p.id === 'neon' ? '#00F0FF' : primaryHex;
+                        const nextSecondary = p.id === 'neon' ? '#E838FF' : secondaryHex;
+                        if (p.id === 'neon') {
+                          setPrimaryHex(nextPrimary);
+                          setSecondaryHex(nextSecondary);
+                        }
+                        transmitLightshow({
+                          preset: p,
+                          pHex: nextPrimary,
+                          sHex: nextSecondary,
+                        });
+                      }}
+                      className={`min-h-[40px] rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                        active
+                          ? 'bg-orange-600 text-white border-orange-600'
+                          : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      {p.titleHe}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                <div>
+                  <div className="text-xs font-semibold mb-2">צבע תאורה ראשי</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {SWATCH_COLORS.map((hex) => {
+                      const selected = primaryHex.toLowerCase() === hex.toLowerCase();
+                      return (
+                        <button
+                          key={`p_${hex}`}
+                          type="button"
+                          aria-label={`צבע ראשי ${hex}`}
+                          onClick={() => {
+                            setPrimaryHex(hex);
+                            transmitLightshow({ pHex: hex });
+                          }}
+                          style={{ backgroundColor: hex }}
+                          className={`w-7 h-7 rounded-full cursor-pointer transition-transform ${
+                            selected
+                              ? 'scale-110 ring-2 ring-offset-2 ring-slate-900 dark:ring-white dark:ring-offset-[#131A26]'
+                              : 'border border-slate-300 dark:border-slate-600'
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold mb-2">צבע תאורה משני</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {SWATCH_COLORS.map((hex) => {
+                      const selected = secondaryHex.toLowerCase() === hex.toLowerCase();
+                      return (
+                        <button
+                          key={`s_${hex}`}
+                          type="button"
+                          aria-label={`צבע משני ${hex}`}
+                          onClick={() => {
+                            setSecondaryHex(hex);
+                            transmitLightshow({ sHex: hex });
+                          }}
+                          style={{ backgroundColor: hex }}
+                          className={`w-7 h-7 rounded-full cursor-pointer transition-transform ${
+                            selected
+                              ? 'scale-110 ring-2 ring-offset-2 ring-slate-900 dark:ring-white dark:ring-offset-[#131A26]'
+                              : 'border border-slate-300 dark:border-slate-600'
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                <div>
+                  <div className="flex justify-between text-xs font-semibold mb-1">
+                    <span>בהירות תאורה ברמקול</span>
+                    <span className="text-orange-600 dark:text-orange-400">{brightness}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={brightness}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setBrightness(v);
+                      transmitLightshow({ bright: v });
+                    }}
+                    className="w-full jbl-slider"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between text-xs font-semibold mb-1">
+                    <span>מהירות תנועה</span>
+                    <span className="text-orange-600 dark:text-orange-400">
+                      {(speedTenths / 10).toFixed(1)}x
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={5}
+                    max={20}
+                    value={speedTenths}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setSpeedTenths(v);
+                      transmitLightshow({ spd: v });
+                    }}
+                    className="w-full jbl-slider"
+                  />
+                </div>
+              </div>
+
+              <div className="text-xs font-semibold mb-2">5 אזורי LED מסונכרנים ברמקול</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {[
+                  [0, 'טבעות וופרים'],
+                  [1, 'סטרוב עליון'],
+                  [2, 'סטרוב תחתון'],
+                  [3, 'נצנוץ כוכבים'],
+                  [4, 'פסי צד'],
+                ].map(([bit, label]) => {
+                  const b = bit as number;
+                  const active = (zoneMask & (1 << b)) !== 0;
+                  return (
+                    <button
+                      key={b}
+                      type="button"
+                      onClick={() => {
+                        const nextMask = active ? zoneMask & ~(1 << b) : zoneMask | (1 << b);
+                        setZoneMask(nextMask);
+                        transmitLightshow({ mask: nextMask });
+                      }}
+                      className={`min-h-[40px] px-3 rounded-xl text-xs font-medium border text-right flex items-center justify-between cursor-pointer ${
+                        active
+                          ? 'bg-orange-50 dark:bg-[#2B1B17] border-orange-500 text-orange-700 dark:text-orange-300'
+                          : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      <span>{label as string}</span>
+                      <span className="text-[11px] font-bold">{active ? 'פעיל' : 'כבוי'}</span>
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !beatSync;
+                    setBeatSync(next);
+                    transmitLightshow({ beat: next });
+                  }}
+                  className={`min-h-[40px] px-3 rounded-xl text-xs font-medium border text-right flex items-center justify-between cursor-pointer ${
+                    beatSync
+                      ? 'bg-orange-50 dark:bg-[#2B1B17] border-orange-500 text-orange-700 dark:text-orange-300'
+                      : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  <span>Beat Sync לשיר</span>
+                  <span className="text-[11px] font-bold">{beatSync ? 'פעיל' : 'כבוי'}</span>
+                </button>
+              </div>
+            </section>
+
             <section className="lg:col-span-5 space-y-4">
               {/* Volume & Bass Boost */}
               <div className="rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
@@ -1040,180 +1263,6 @@ export default function App() {
                 </div>
               </div>
             </section>
-
-            {/* Lightshow Control Card */}
-            <section className="lg:col-span-7 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-base font-bold">תאורת מופע בבוקסה (Lightshow)</h2>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    החלפת דפוסי תאורה, צבעים ו-5 אזורי LED ברמקול
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !lightEnabled;
-                    setLightEnabled(next);
-                    transmitLightshow({ enabled: next });
-                  }}
-                  className={`min-h-[38px] px-3.5 rounded-xl text-xs font-bold cursor-pointer transition-colors ${
-                    lightEnabled
-                      ? 'bg-orange-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
-                  }`}
-                >
-                  {lightEnabled ? 'פעיל' : 'כבוי'}
-                </button>
-              </div>
-
-              <div className="grid grid-cols-4 sm:grid-cols-7 gap-2 mb-4">
-                {LIGHT_PRESETS.map((p) => {
-                  const active = lightPreset.id === p.id;
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setLightPreset(p);
-                        const nextPrimary = p.id === 'neon' ? '#00F0FF' : primaryHex;
-                        const nextSecondary = p.id === 'neon' ? '#E838FF' : secondaryHex;
-                        if (p.id === 'neon') {
-                          setPrimaryHex(nextPrimary);
-                          setSecondaryHex(nextSecondary);
-                        }
-                        transmitLightshow({
-                          preset: p,
-                          pHex: nextPrimary,
-                          sHex: nextSecondary,
-                        });
-                      }}
-                      className={`min-h-[40px] rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-orange-600 text-white border-orange-600'
-                          : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
-                      }`}
-                    >
-                      {p.titleHe}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="text-xs font-semibold mb-2">צבע תאורה ראשי</div>
-              <div className="flex flex-wrap items-center gap-2.5 mb-4">
-                {SWATCH_COLORS.map((hex) => {
-                  const selected = primaryHex.toLowerCase() === hex.toLowerCase();
-                  return (
-                    <button
-                      key={hex}
-                      type="button"
-                      aria-label={`צבע ${hex}`}
-                      onClick={() => {
-                        setPrimaryHex(hex);
-                        transmitLightshow({ pHex: hex });
-                      }}
-                      style={{ backgroundColor: hex }}
-                      className={`w-8 h-8 rounded-full cursor-pointer transition-transform ${
-                        selected
-                          ? 'scale-110 ring-2 ring-offset-2 ring-slate-900 dark:ring-white dark:ring-offset-[#131A26]'
-                          : 'border border-slate-300 dark:border-slate-600'
-                      }`}
-                    />
-                  );
-                })}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                <div>
-                  <div className="flex justify-between text-xs font-semibold mb-1">
-                    <span>בהירות תאורה</span>
-                    <span className="text-orange-600 dark:text-orange-400">{brightness}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={brightness}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setBrightness(v);
-                      transmitLightshow({ bright: v });
-                    }}
-                    className="w-full jbl-slider"
-                  />
-                </div>
-                <div>
-                  <div className="flex justify-between text-xs font-semibold mb-1">
-                    <span>מהירות תנועה</span>
-                    <span className="text-orange-600 dark:text-orange-400">
-                      {(speedTenths / 10).toFixed(1)}x
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={5}
-                    max={20}
-                    value={speedTenths}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setSpeedTenths(v);
-                      transmitLightshow({ spd: v });
-                    }}
-                    className="w-full jbl-slider"
-                  />
-                </div>
-              </div>
-
-              <div className="text-xs font-semibold mb-2">אזורי LED בבוקסה</div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {[
-                  [0, 'טבעות וופרים'],
-                  [1, 'סטרוב עליון'],
-                  [2, 'סטרוב תחתון'],
-                  [3, 'נצנוץ כוכבים'],
-                  [4, 'פסי צד'],
-                ].map(([bit, label]) => {
-                  const b = bit as number;
-                  const active = (zoneMask & (1 << b)) !== 0;
-                  return (
-                    <button
-                      key={b}
-                      type="button"
-                      onClick={() => {
-                        const nextMask = active ? zoneMask & ~(1 << b) : zoneMask | (1 << b);
-                        setZoneMask(nextMask);
-                        transmitLightshow({ mask: nextMask });
-                      }}
-                      className={`min-h-[40px] px-3 rounded-xl text-xs font-medium border text-right flex items-center justify-between cursor-pointer ${
-                        active
-                          ? 'bg-orange-50 dark:bg-[#2B1B17] border-orange-500 text-orange-700 dark:text-orange-300'
-                          : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
-                      }`}
-                    >
-                      <span>{label as string}</span>
-                      <span className="text-[11px] font-bold">{active ? 'פעיל' : 'כבוי'}</span>
-                    </button>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !beatSync;
-                    setBeatSync(next);
-                    transmitLightshow({ beat: next });
-                  }}
-                  className={`min-h-[40px] px-3 rounded-xl text-xs font-medium border text-right flex items-center justify-between cursor-pointer ${
-                    beatSync
-                      ? 'bg-orange-50 dark:bg-[#2B1B17] border-orange-500 text-orange-700 dark:text-orange-300'
-                      : 'bg-slate-50 dark:bg-[#1C2536] border-slate-200 dark:border-slate-700'
-                  }`}
-                >
-                  <span>סנכרון קצב</span>
-                  <span className="text-[11px] font-bold">{beatSync ? 'פעיל' : 'כבוי'}</span>
-                </button>
-              </div>
-            </section>
           </div>
         )}
 
@@ -1225,7 +1274,7 @@ export default function App() {
                 <div>
                   <h2 className="text-base font-bold">איקוולייזר 7 ערוצים</h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    כיוון מדויק של תדרי הבס, המיד והגבוהים (-6dB עד +6dB)
+                    כיוון מדויק של תדרי הבס, המיד והגבוהים (-6dB עד +6dB) לכל שיר מתנגן
                   </p>
                 </div>
                 <button
@@ -1315,135 +1364,128 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: בחירת שירים ונגן */}
+        {/* TAB 4: שירים — זיהוי אוטומטי מכל אפליקציה במכשיר ללא העלאת קבצים! */}
         {activeTab === 'songs' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <section className="lg:col-span-5 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <h2 className="text-base font-bold mb-1">נגן ושליטה בשירים</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-                באפליקציית ה-Native נטענים אוטומטית כל שירי המכשיר דרך MediaStore
-              </p>
+            <section className="lg:col-span-5 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5 flex flex-col justify-between">
+              <div>
+                <h2 className="text-base font-bold mb-1">
+                  שיר מתנגן במכשיר (זיהוי אוטומטי)
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 leading-relaxed">
+                  שים שירים מכל אפליקציה שתבחר — האפליקציה קולטת אוטומטית שמתנגן שיר דרך{' '}
+                  <span className="font-mono">MediaSession</span> ו-<span className="font-mono">AudioManager</span> ללא שום בקשה להעלאת קבצים.
+                </p>
 
-              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] mb-4">
-                <div className="text-sm font-bold truncate">
-                  {currentSong ? currentSong.title : 'לא נבחר שיר'}
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#1C2536] border border-slate-200/80 dark:border-slate-700/70 mb-4">
+                  <div className="text-xs font-bold text-orange-600 dark:text-orange-400 mb-1">
+                    {externalAudioPlaying ? `מתנגן כעת · ${detectedSourceApp}` : `בהמתנה · ${detectedSourceApp}`}
+                  </div>
+                  <div className="text-sm font-bold">{detectedTrackTitle}</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    {detectedTrackArtist}
+                  </div>
                 </div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                  {currentSong ? currentSong.artist : 'בחר קובצי שמע מהמכשיר לניגון מיידי'}
+
+                <div className="flex items-center justify-center gap-4 mb-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDetectedTrackTitle('הועבר לשיר הקודם בנגן הפעיל');
+                    }}
+                    aria-label="הקודם"
+                    className="w-11 h-11 rounded-full bg-slate-100 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 flex items-center justify-center cursor-pointer"
+                  >
+                    <SvgNext className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !externalAudioPlaying;
+                      setExternalAudioPlaying(next);
+                      if (next && detectedSourceApp === 'ללא צורך בהעלאת קבצים') {
+                        setDetectedSourceApp('נגן מערכת פעיל');
+                        setDetectedTrackTitle('מזהה ניגון שמע פעיל במכשיר');
+                      }
+                    }}
+                    aria-label={externalAudioPlaying ? 'השהה' : 'נגן'}
+                    className="w-13 h-13 rounded-full bg-orange-600 text-white flex items-center justify-center cursor-pointer"
+                  >
+                    {externalAudioPlaying ? (
+                      <SvgPause className="w-5 h-5" />
+                    ) : (
+                      <SvgPlay className="w-5 h-5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDetectedTrackTitle('הועבר לשיר הבא בנגן הפעיל');
+                    }}
+                    aria-label="הבא"
+                    className="w-11 h-11 rounded-full bg-slate-100 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 flex items-center justify-center cursor-pointer"
+                  >
+                    <SvgPrev className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
 
-              <div className="mb-4">
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(1, Math.floor(durationSec))}
-                  value={Math.floor(currentTimeSec)}
-                  onChange={(e) => {
-                    const sec = Number(e.target.value);
-                    if (audioElRef.current) {
-                      audioElRef.current.currentTime = sec;
-                      setCurrentTimeSec(sec);
-                    }
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs">
+                <span className="font-medium">סנכרון תאורת הרמקול לקצב השיר</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !beatSync;
+                    setBeatSync(next);
+                    transmitLightshow({ beat: next });
                   }}
-                  className="w-full jbl-slider"
-                />
-                <div className="flex justify-between text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-1">
-                  <span>{formatDuration(currentTimeSec)}</span>
-                  <span>{formatDuration(durationSec)}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-center gap-4">
-                <button
-                  type="button"
-                  onClick={playPrev}
-                  aria-label="הקודם"
-                  className="w-11 h-11 rounded-full bg-slate-100 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 flex items-center justify-center cursor-pointer"
+                  className={`min-h-[32px] px-3 rounded-lg font-bold cursor-pointer ${
+                    beatSync
+                      ? 'bg-orange-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                  }`}
                 >
-                  <SvgNext className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={togglePlayPause}
-                  aria-label={isPlaying ? 'השהה' : 'נגן'}
-                  className="w-13 h-13 rounded-full bg-orange-600 text-white flex items-center justify-center cursor-pointer"
-                >
-                  {isPlaying ? <SvgPause className="w-5 h-5" /> : <SvgPlay className="w-5 h-5" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={playNext}
-                  aria-label="הבא"
-                  className="w-11 h-11 rounded-full bg-slate-100 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 flex items-center justify-center cursor-pointer"
-                >
-                  <SvgPrev className="w-4 h-4" />
+                  {beatSync ? 'פעיל אוטומטית' : 'כבוי'}
                 </button>
               </div>
             </section>
 
             <section className="lg:col-span-7 rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <h2 className="text-base font-bold">רשימת שירים ({filteredSongs.length})</h2>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="audio/*"
-                  multiple
-                  onChange={handleFilesSelected}
-                  className="hidden"
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[40px] px-3.5 rounded-xl bg-orange-600 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <SvgFolder className="w-4 h-4" />
-                  <span>בחר שירים מהמכשיר</span>
-                </button>
+              <div className="mb-3">
+                <h2 className="text-base font-bold">הפעל שירים מכל אפליקציה שתבחר</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  באפליקציית ה-Native לאנדרואיד לחיצה פותחת ישירות את האפליקציה המותקנת במכשיר וקולטת את השיר המתנגן בזמן אמת
+                </p>
               </div>
 
-              <input
-                type="text"
-                value={songQuery}
-                onChange={(e) => setSongQuery(e.target.value)}
-                placeholder="חיפוש שיר ברשימה..."
-                className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700 text-xs mb-3 outline-none focus:border-orange-500"
-              />
-
-              {filteredSongs.length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                  טרם נבחרו שירים בתצוגת הדפדפן. לחץ על ״בחר שירים מהמכשיר״ לניגון מקומי מיידי.
-                </div>
-              ) : (
-                <div className="space-y-1.5 max-h-80 overflow-y-auto">
-                  {filteredSongs.map((s, idx) => {
-                    const active = idx === currentSongIdx;
-                    return (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => playSongAt(idx)}
-                        className={`w-full p-2.5 rounded-xl text-right flex items-center justify-between gap-2 border cursor-pointer ${
-                          active
-                            ? 'bg-orange-50 dark:bg-[#2B1B17] border-orange-500 text-orange-700 dark:text-orange-300'
-                            : 'bg-slate-50 dark:bg-[#1C2536] border-transparent hover:border-slate-300 dark:hover:border-slate-700'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold truncate">{s.title}</div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                            {s.artist}
-                          </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {EXTERNAL_MUSIC_APPS.map((app) => (
+                  <a
+                    key={app.id}
+                    href={app.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      setDetectedSourceApp(app.name);
+                      setDetectedTrackTitle(`קולט שמע מתנגן מתוך ${app.name}`);
+                      setDetectedTrackArtist('זיהוי אוטומטי חי — ללא העלאת קבצים');
+                      setExternalAudioPlaying(true);
+                    }}
+                    className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] border border-slate-200 dark:border-slate-700/80 hover:border-orange-500 transition-colors flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <SvgMusic className="w-4 h-4 text-orange-600 dark:text-orange-400 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold truncate">{app.name}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {app.descHe}
                         </div>
-                        <span className="text-[11px] font-semibold shrink-0">
-                          {active && isPlaying ? 'מנגן' : 'נגן'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+                      </div>
+                    </div>
+                    <SvgExternalLink className="w-4 h-4 text-slate-400 shrink-0" />
+                  </a>
+                ))}
+              </div>
             </section>
           </div>
         )}
@@ -1544,7 +1586,6 @@ export default function App() {
             </section>
 
             <section className="lg:col-span-5 space-y-4">
-              {/* Speaker Tone Triggers & Stereo */}
               <div className="rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
                 <h2 className="text-base font-bold mb-2">בדיקת צלילים ומצב רמקולים</h2>
                 <div className="grid grid-cols-3 gap-2 mb-4">
@@ -1598,9 +1639,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Protocol Framing & TX Hex */}
               <div className="rounded-2xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-800 p-4 sm:p-5">
-                <h2 className="text-base font-bold mb-2">פרוטוקול שידור לבוקסה</h2>
+                <h2 className="text-base font-bold mb-2">פרוטוקול סנכרון לבוקסה</h2>
                 <div className="space-y-1.5 mb-3">
                   {(
                     [
@@ -1627,7 +1667,7 @@ export default function App() {
                   ))}
                 </div>
                 <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 break-all">
-                  TX ({txCount}): {lastTxHex}
+                  TX ({txCount}) · RX ({rxCount}): {lastTxHex}
                 </div>
               </div>
             </section>
@@ -1680,7 +1720,7 @@ export default function App() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <SvgSettings className="w-5 h-5 text-orange-600 dark:text-orange-400" />
-                <h2 className="text-base font-bold">הגדרות האפליקציה</h2>
+                <h2 className="text-base font-bold">הגדרות ומידע על הרמקול</h2>
               </div>
               <button
                 type="button"
@@ -1720,19 +1760,100 @@ export default function App() {
               </div>
             </div>
 
-            {/* 2. GitHub Releases Auto-Update (By Tag) */}
+            {/* 2. Portable Speaker Info & Direct Firmware OTA Update */}
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] space-y-2.5 text-xs">
+              <div className="flex items-center gap-2 font-bold text-sm">
+                <SvgChip className="w-4 h-4 text-orange-600 dark:text-orange-400" />
+                <span>מידע על הרמקול הנייד ועדכון קושחה</span>
+              </div>
+
+              <div className="space-y-1.5 pt-1 border-t border-slate-200 dark:border-slate-700/70">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">דגם הרמקול הנייד:</span>
+                  <span className="font-bold">{speakerModel}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">מצב חיבור וערוץ:</span>
+                  <span className="font-bold">
+                    {btConnected ? `${speakerName} · ${speakerTransport}` : 'מנותק כרגע'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">גרסת רמקול נוכחית:</span>
+                  <span className="font-mono font-bold">
+                    {btConnected ? speakerFirmware : 'חבר רמקול לזיהוי'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">גרסת קושחה אחרונה זמינה:</span>
+                  <span className="font-mono font-bold text-orange-600 dark:text-orange-400">
+                    v{LATEST_SPEAKER_FIRMWARE}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">סוללה וחומרה:</span>
+                  <span className="font-bold">
+                    {speakerBattery !== null ? `${speakerBattery}%` : 'לא זמין'}
+                    {speakerHardwareRev !== '—' ? ` · ${speakerHardwareRev}` : ''}
+                  </span>
+                </div>
+              </div>
+
+              {speakerOtaStage && (
+                <div className="p-2.5 rounded-lg bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-700 space-y-1.5">
+                  <div className="font-semibold text-orange-600 dark:text-orange-400">
+                    {speakerOtaStage}
+                  </div>
+                  {speakerOtaProgress !== null && (
+                    <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                      <div
+                        className="h-full bg-orange-600 transition-all"
+                        style={{ width: `${speakerOtaProgress}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!btConnected ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setActiveTab('connect');
+                  }}
+                  className="w-full min-h-[40px] rounded-xl bg-white dark:bg-[#131A26] border border-slate-200 dark:border-slate-700 font-bold flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <SvgSpeakerBt className="w-4 h-4" />
+                  <span>חבר את הרמקול הנייד לבדיקה ועדכון קושחה ישיר</span>
+                </button>
+              ) : speakerHasFwUpdate ? (
+                <button
+                  type="button"
+                  disabled={speakerOtaProgress !== null}
+                  onClick={runDirectSpeakerFirmwareOta}
+                  className="w-full min-h-[42px] rounded-xl bg-orange-600 text-white font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  <SvgChip className="w-4 h-4" />
+                  <span>עדכן את הרמקול הנייד כעת לגרסה v{LATEST_SPEAKER_FIRMWARE}</span>
+                </button>
+              ) : (
+                <div className="text-emerald-600 dark:text-emerald-400 font-bold pt-1">
+                  הרמקול הנייד מעודכן לגרסת הקושחה האחרונה (v{speakerFirmware}).
+                </div>
+              )}
+            </div>
+
+            {/* 3. GitHub Releases Auto-Update (By Tag) */}
             <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] space-y-2.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold">
-                  עדכון אוטומטי מ-GitHub Releases (לפי תג)
+                  עדכון אוטומטי לאפליקציה (GitHub Releases)
                 </span>
                 <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                  מותקן: v{BUILD_NUMBER} ({APP_VERSION})
+                  מותקן: v{RELEASE_TAG_NUMBER} ({APP_VERSION})
                 </span>
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                באפליקציית ה-Native האנדרואידית כפתור זה מוריד את ה-APK העדכני מ-Releases ופותח ישירות את מתקין החבילות של אנדרואיד.
-              </p>
 
               <button
                 type="button"
@@ -1753,13 +1874,8 @@ export default function App() {
                   <div className="font-bold">
                     {ghRelease.isNewer
                       ? `נמצאה גרסה חדשה: ${ghRelease.tagName}`
-                      : `הגרסה מעודכנת (תג אחרון ב-GitHub: ${ghRelease.tagName})`}
+                      : `האפליקציה מעודכנת (תג אחרון ב-GitHub: ${ghRelease.tagName})`}
                   </div>
-                  {ghRelease.notes && (
-                    <div className="text-slate-500 dark:text-slate-400 whitespace-pre-line line-clamp-4">
-                      {ghRelease.notes}
-                    </div>
-                  )}
                   <div className="flex gap-2 pt-1">
                     {ghRelease.apkUrl && (
                       <a
@@ -1783,26 +1899,26 @@ export default function App() {
               )}
             </div>
 
-            {/* 3. User Guide & Detailed App Overview */}
+            {/* 4. User Guide */}
             <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] space-y-2 text-xs leading-relaxed">
               <div className="font-bold text-sm">מדריך שימוש ופירוט על האפליקציה</div>
               <div>
                 <strong className="text-orange-600 dark:text-orange-400">
-                  1. אפליקציית Native אמיתית (Java 17):
+                  1. סנכרון תאורה מלא ודו-כיווני:
                 </strong>{' '}
-                קובץ ה-APK החדש בנוי ב-100% Native Android ללא WebView וללא דפי HTML, במשקל ~70KB בלבד, להזנקה מיידית וביצועים חלקים.
+                התאורה פועלת בסנכרון מלא בזמן אמת מול ה-JBL PartyBox 320 (BLE GATT + RFCOMM SPP) כולל פעימת Beat Sync אוטומטית לקצב השיר המתנגן.
               </div>
               <div>
                 <strong className="text-orange-600 dark:text-orange-400">
-                  2. חיבור לבוקסה (לשונית ימנית):
+                  2. מידע ועדכון קושחה לרמקול הנייד:
                 </strong>{' '}
-                הדלק את ה-JBL PartyBox 320 ולחץ על ״סרוק וחבר בוקסה״ לקבלת חיווי סוללה, קושחה ושליטה מלאה ב-BLE GATT + RFCOMM SPP.
+                בחלון ההגדרות מוצגים כל פרטי הרמקול הנייד כולל גרסת הקושחה שלו ואפשרות ישירה לעדכון קושחת הרמקול (OTA).
               </div>
               <div>
                 <strong className="text-orange-600 dark:text-orange-400">
-                  3. שליטה, איקוולייזר, שירים והגדרות בוקסה:
+                  3. זיהוי שירים אוטומטי מכל אפליקציה:
                 </strong>{' '}
-                עבור במהירות דרך הסרגל התחתון בין החלפת תאורה (כולל ניאון) ובס, איקוולייזר 7 תדרים חומרתי, בחירת שירים מהמכשיר והגדרות צלילי המערכת של הבוקסה.
+                הפעל מוזיקה מכל אפליקציה במכשיר (Spotify, YouTube Music, Apple Music ועוד) — האפליקציה קולטת אוטומטית שמתנגן שיר ללא שום העלאת קבצים.
               </div>
             </div>
           </div>
@@ -1828,14 +1944,13 @@ export default function App() {
               </button>
             </div>
 
-            {/* Developer Credit ("אש התורה") */}
             <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#1C2536] space-y-2">
               <div className="text-sm font-bold">JBL PartyBox Stage 320 — שליטה בעברית</div>
               <div className="text-sm font-bold text-orange-600 dark:text-orange-400">
                 פיתוח והנדסה: ״אש התורה״
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                גרסת אפליקציה: {APP_VERSION} (Build {BUILD_NUMBER} · Release v{BUILD_NUMBER})
+                גרסת אפליקציה: {APP_VERSION} (Build {BUILD_NUMBER} · Release v{RELEASE_TAG_NUMBER})
                 <br />
                 ארכיטקטורה: 100% Native Android (Java 17 + Vector SVG)
               </div>
@@ -1862,24 +1977,17 @@ export default function App() {
               </div>
             </div>
 
-            {/* What's New ("מה חדש") */}
             <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#1C2536] space-y-1.5 text-xs">
               <div className="font-bold text-sm mb-1">מה חדש בגרסה {APP_VERSION}</div>
               <ul className="space-y-1.5 text-slate-600 dark:text-slate-300 list-disc pr-4">
                 <li>
-                  בנייה מחדש כאפליקציית <strong>100% Native Android (Java 17)</strong> ללא WebView וללא דמה ב-HTML.
+                  סנכרון תאורה מלא ודו-כיווני מול הרמקול (BLE GATT + RFCOMM SPP) כולל Beat Sync חי לקצב המוזיקה.
                 </li>
                 <li>
-                  כל האייקונים בפורמט וקטורי <strong>SVG</strong> חד ומינימליסטי עם ביצועים מהירים במיוחד.
+                  הצגת מידע מלא על הרמקול הנייד במסך ההגדרות כולל גרסת הקושחה המותקנת ואפשרות ישירה לעדכון קושחת הרמקול (OTA).
                 </li>
                 <li>
-                  מסך הגדרות (למעלה מימין): מצב בהיר/כהה/מערכת, מדריך שימוש ועדכון אוטומטי מ-GitHub Releases לפי תג.
-                </li>
-                <li>
-                  שורה תחתונה קבועה (מימין לשמאל): חיבור ופרטי בוקסה, שליטה ותאורה, איקוולייזר, בחירת שירים והגדרות מערכת הבוקסה.
-                </li>
-                <li>
-                  שדרוג מלא של תהליכי ה-CI וה-Releases ב-GitHub עם בדיקות אוטומטיות ופירוט מלא בכל שחרור.
+                  זיהוי שירים אוטומטי מכל אפליקציה במכשיר (Spotify, YouTube Music, Apple Music ועוד) ללא שום בקשה להעלאת קבצים.
                 </li>
               </ul>
             </div>

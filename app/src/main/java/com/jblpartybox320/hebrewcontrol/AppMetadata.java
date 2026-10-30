@@ -1,9 +1,9 @@
 package com.jblpartybox320.hebrewcontrol;
 
 public final class AppMetadata {
-    public static final String VERSION_NAME = "0.3.0";
-    public static final int VERSION_CODE = 5;
-    public static final int RELEASE_TAG_NUMBER = 5;
+    public static final String VERSION_NAME = "0.4.0";
+    public static final int VERSION_CODE = 6;
+    public static final int RELEASE_TAG_NUMBER = 7;
     public static final String DEVELOPER_NAME = "אש התורה";
     public static final String GITHUB_REPO = "ES2323ES/jbl-partybox-320-hebrew";
     public static final String GITHUB_PROFILE_URL = "https://github.com/ES2323ES";

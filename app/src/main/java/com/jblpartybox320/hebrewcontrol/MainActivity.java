@@ -4,7 +4,6 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
-import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,9 +15,7 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.Editable;
 import android.text.TextUtils;
-import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -40,17 +37,22 @@ import com.jblpartybox320.hebrewcontrol.audio.AudioEqController.EqPreset;
 import com.jblpartybox320.hebrewcontrol.bluetooth.BluetoothController;
 import com.jblpartybox320.hebrewcontrol.bluetooth.BluetoothController.DiscoveredSpeaker;
 import com.jblpartybox320.hebrewcontrol.bluetooth.BluetoothController.SpeakerTelemetry;
+import com.jblpartybox320.hebrewcontrol.player.MediaSessionListenerService;
 import com.jblpartybox320.hebrewcontrol.player.MusicPlayerController;
-import com.jblpartybox320.hebrewcontrol.player.MusicPlayerController.SongItem;
+import com.jblpartybox320.hebrewcontrol.player.MusicPlayerController.ExternalTrackInfo;
+import com.jblpartybox320.hebrewcontrol.player.MusicPlayerController.MusicAppShortcut;
 import com.jblpartybox320.hebrewcontrol.protocol.JblProtocol;
 import com.jblpartybox320.hebrewcontrol.protocol.JblProtocol.BassMode;
 import com.jblpartybox320.hebrewcontrol.protocol.JblProtocol.LightPreset;
+import com.jblpartybox320.hebrewcontrol.protocol.JblProtocol.LightshowState;
 import com.jblpartybox320.hebrewcontrol.protocol.JblProtocol.ProtocolMode;
 import com.jblpartybox320.hebrewcontrol.ui.ThemeEngine;
 import com.jblpartybox320.hebrewcontrol.ui.ThemeEngine.Palette;
 import com.jblpartybox320.hebrewcontrol.ui.ThemeEngine.ThemeModePref;
 import com.jblpartybox320.hebrewcontrol.update.GithubAutoUpdater;
 import com.jblpartybox320.hebrewcontrol.update.GithubAutoUpdater.ReleaseInfo;
+import com.jblpartybox320.hebrewcontrol.update.SpeakerFirmwareUpdater;
+import com.jblpartybox320.hebrewcontrol.update.SpeakerFirmwareUpdater.FirmwareCheckResult;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -60,14 +62,12 @@ import java.util.Locale;
 
 /**
  * 100% Native Android (Java 17) Controller for JBL PartyBox Stage 320.
- * Zero WebView, zero HTML assets, instant startup, 100% VectorDrawable SVG icons,
- * full RTL Hebrew layout with Right Settings, Left About, and 5-tab Bottom Bar.
+ * Zero WebView, zero HTML assets, zero file uploads — full bidirectional speaker lighting sync,
+ * portable speaker info & direct firmware OTA update in Settings, and universal external music detection.
  */
 public class MainActivity extends Activity {
 
     private static final int REQ_PERMISSIONS_BT = 101;
-    private static final int REQ_PERMISSIONS_AUDIO = 102;
-    private static final int REQ_PICK_AUDIO_FILES = 201;
 
     private SharedPreferences prefs;
     private BluetoothController btController;
@@ -78,14 +78,14 @@ public class MainActivity extends Activity {
     private Palette palette;
     private int activeTabIndex = 0;
 
-    // Hardware & Lightshow State
+    // Hardware & Full Bidirectional Lightshow Sync State
     private boolean lightEnabled = true;
     private LightPreset lightPreset = LightPreset.NEON;
     private int zoneMask = 0x1F;
     private int lightBrightness = 85;
     private int lightSpeedTenths = 10;
     private String primaryColorHex = "#00F0FF";
-    private String secondaryColorHex = "#FF5A1F";
+    private String secondaryColorHex = "#E838FF";
     private boolean beatSync = true;
     private int micVolume = 65;
     private int micEcho = 30;
@@ -103,6 +103,7 @@ public class MainActivity extends Activity {
     private SpeakerTelemetry latestTelemetry = new SpeakerTelemetry();
     private List<DiscoveredSpeaker> latestDevices = Collections.emptyList();
     private ReleaseInfo latestReleaseInfo = null;
+    private FirmwareCheckResult latestSpeakerFwResult = null;
 
     private LinearLayout rootLayout;
     private FrameLayout contentFrame;
@@ -111,10 +112,11 @@ public class MainActivity extends Activity {
     private View headerConnDot;
     private TextView connNameTv, connStatusTv, connBatTv, connVerTv, connTransTv, connMacTv;
     private LinearLayout connDevicesList;
-    private TextView songNowTitleTv, songNowSubTv, songCountTv;
+    private TextView lightSyncStatusTv;
+    private TextView songSourceBadgeTv, songNowTitleTv, songNowSubTv, songTimeTv;
     private ImageView songPlayPauseImg;
     private SeekBar songSeekBar;
-    private LinearLayout songListLayout;
+    private FrameLayout songPermissionHost;
     private TextView txHexLabel;
 
     private interface IntSliderListener {
@@ -139,14 +141,46 @@ public class MainActivity extends Activity {
         playerController = new MusicPlayerController(
                 this,
                 sessionId -> eqController.attachToSession(sessionId),
-                this::refreshSongsDynamicUi
+                this::refreshSongsDynamicUi,
+                this::onExternalMusicBeatPulse
         );
-        btController = new BluetoothController(this, (tel, devs) -> {
-            latestTelemetry = tel;
-            latestDevices = devs;
-            refreshConnectionDynamicUi();
-            if (txHexLabel != null) {
-                txHexLabel.setText("חבילה אחרונה (" + tel.txPacketCount + "): " + tel.lastTxHex);
+        btController = new BluetoothController(this, new BluetoothController.Listener() {
+            @Override
+            public void onBluetoothStateUpdated(SpeakerTelemetry tel, List<DiscoveredSpeaker> devs) {
+                latestTelemetry = tel;
+                latestDevices = devs;
+                refreshConnectionDynamicUi();
+                refreshLightSyncBanner();
+                if (txHexLabel != null) {
+                    txHexLabel.setText(
+                            "TX (" + tel.txPacketCount + ") · RX (" + tel.rxPacketCount + "): " + tel.lastTxHex
+                    );
+                }
+            }
+
+            @Override
+            public void onSpeakerLightshowSynced(LightshowState remoteState) {
+                if (remoteState == null) return;
+                lightEnabled = remoteState.enabled;
+                lightPreset = remoteState.preset;
+                zoneMask = remoteState.zoneMask;
+                lightBrightness = remoteState.brightness;
+                lightSpeedTenths = remoteState.speedTenths;
+                primaryColorHex = remoteState.primaryHex;
+                secondaryColorHex = remoteState.secondaryHex;
+                beatSync = remoteState.beatSync;
+                savePersistedSettings();
+                if (activeTabIndex == 1) {
+                    renderActiveTab();
+                }
+            }
+
+            @Override
+            public void onSpeakerConnectedReady() {
+                // Full initial lockstep sync between app state and portable speaker hardware
+                transmitCurrentLightshow(false);
+                transmitCurrentEq();
+                transmitSpeakerSettings();
             }
         });
 
@@ -161,7 +195,6 @@ public class MainActivity extends Activity {
 
         rebuildEntireChrome();
         ensureBluetoothAndScan(true);
-        tryLoadMusicIfPermitted();
 
         if (autoCheckGithubUpdates) {
             GithubAutoUpdater.checkLatestRelease(new GithubAutoUpdater.ReleaseCheckCallback() {
@@ -171,7 +204,7 @@ public class MainActivity extends Activity {
                     if (info.isNewer) {
                         Toast.makeText(
                                 MainActivity.this,
-                                "זמין עדכון חדש ב-GitHub (" + info.tagName + ") — פתח הגדרות להתקנה",
+                                "זמין עדכון אפליקציה ב-GitHub (" + info.tagName + ") — פתח הגדרות להתקנה",
                                 Toast.LENGTH_LONG
                         ).show();
                     }
@@ -181,6 +214,13 @@ public class MainActivity extends Activity {
                 public void onError(String message) {}
             });
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        MediaSessionListenerService.triggerManualRefresh(this);
+        refreshSongsDynamicUi();
     }
 
     @Override
@@ -201,6 +241,19 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    private void onExternalMusicBeatPulse(int energyPercent, int bassPercent, boolean isPlaying) {
+        if (!isPlaying || !lightEnabled || !beatSync || !btController.isConnected()) {
+            return;
+        }
+        byte[] pulseFrame = JblProtocol.encodeLightBeatPulsePacket(
+                energyPercent,
+                bassPercent,
+                primaryColorHex,
+                zoneMask
+        );
+        btController.sendLightshowRealtime(pulseFrame);
+    }
+
     private void loadPersistedSettings() {
         themePref = ThemeModePref.fromKey(prefs.getString("theme_mode", "system"));
         lightEnabled = prefs.getBoolean("light_enabled", true);
@@ -211,7 +264,7 @@ public class MainActivity extends Activity {
         lightBrightness = prefs.getInt("light_brightness", 85);
         lightSpeedTenths = prefs.getInt("light_speed", 10);
         primaryColorHex = prefs.getString("primary_hex", "#00F0FF");
-        secondaryColorHex = prefs.getString("secondary_hex", "#FF5A1F");
+        secondaryColorHex = prefs.getString("secondary_hex", "#E838FF");
         beatSync = prefs.getBoolean("beat_sync", true);
         feedbackTonesEnabled = prefs.getBoolean("feedback_tones", true);
         playtimeBoost = prefs.getBoolean("playtime_boost", false);
@@ -290,7 +343,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(56f)
         ));
 
-        // Right button: Settings
+        // Right button: Settings (הגדרות + מידע ועדכון רמקול נייד)
         LinearLayout settingsBtn = new LinearLayout(this);
         settingsBtn.setOrientation(LinearLayout.HORIZONTAL);
         settingsBtn.setGravity(Gravity.CENTER);
@@ -430,7 +483,9 @@ public class MainActivity extends Activity {
 
     private void renderActiveTab() {
         connNameTv = null;
+        lightSyncStatusTv = null;
         songNowTitleTv = null;
+        songPermissionHost = null;
         txHexLabel = null;
         contentFrame.removeAllViews();
 
@@ -536,7 +591,10 @@ public class MainActivity extends Activity {
         container.setPadding(dp(16f), dp(16f), dp(16f), dp(24f));
 
         LinearLayout infoCard = createCard();
-        infoCard.addView(sectionTitle("פרטי הבוקסה המחוברת", "שם התקן, סוללה, גרסת קושחה וערוץ תקשורת"));
+        infoCard.addView(sectionTitle(
+                "פרטי הבוקסה והסנכרון החי",
+                "שם הרמקול, סוללה, גרסת קושחה וסנכרון דו-כיווני מלא"
+        ));
 
         connNameTv = new TextView(this);
         connNameTv.setTextSize(18f);
@@ -561,7 +619,7 @@ public class MainActivity extends Activity {
         connBatTv = new TextView(this);
         connVerTv = new TextView(this);
         LinearLayout batBox = buildMetricTile("סוללה", connBatTv);
-        LinearLayout verBox = buildMetricTile("גרסת קושחה / פרוטוקול", connVerTv);
+        LinearLayout verBox = buildMetricTile("גרסת קושחת רמקול", connVerTv);
         LinearLayout.LayoutParams col1Lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         col1Lp.setMarginEnd(dp(8f));
         row1.addView(batBox, col1Lp);
@@ -578,7 +636,7 @@ public class MainActivity extends Activity {
 
         connTransTv = new TextView(this);
         connMacTv = new TextView(this);
-        LinearLayout transBox = buildMetricTile("ערוץ חיבור", connTransTv);
+        LinearLayout transBox = buildMetricTile("ערוץ סנכרון", connTransTv);
         LinearLayout macBox = buildMetricTile("כתובת MAC / אות", connMacTv);
         LinearLayout.LayoutParams col2Lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         col2Lp.setMarginEnd(dp(8f));
@@ -643,7 +701,10 @@ public class MainActivity extends Activity {
 
         connNameTv.setText(latestTelemetry.deviceName);
         connStatusTv.setText(latestTelemetry.statusNote);
-        connBatTv.setText(latestTelemetry.batteryPercent != null ? (latestTelemetry.batteryPercent + "%") : "לא זמין");
+        String batText = latestTelemetry.batteryPercent != null
+                ? (latestTelemetry.batteryPercent + "%" + (latestTelemetry.isCharging ? " (בטעינה)" : ""))
+                : "לא זמין";
+        connBatTv.setText(batText);
         connVerTv.setText(latestTelemetry.firmwareVersion);
         connTransTv.setText(latestTelemetry.transportLabel);
         String rssiStr = latestTelemetry.rssiDbm != null ? (" · " + latestTelemetry.rssiDbm + "dBm") : "";
@@ -716,7 +777,7 @@ public class MainActivity extends Activity {
     }
 
     // =========================================================================
-    // TAB 1: שליטה ותאורה בבוקסה
+    // TAB 1: שליטה וסנכרון תאורה מלא עם הרמקול
     // =========================================================================
     private View buildSpeakerControlTab() {
         ScrollView scroll = new ScrollView(this);
@@ -724,7 +785,170 @@ public class MainActivity extends Activity {
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(dp(16f), dp(16f), dp(16f), dp(24f));
 
-        // 1. Volume & Bass Boost Card
+        // 1. Lightshow Full Sync Card
+        LinearLayout lightCard = createCard();
+        LinearLayout headerRow = new LinearLayout(this);
+        headerRow.setOrientation(LinearLayout.HORIZONTAL);
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams hrLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        hrLp.bottomMargin = dp(8f);
+        headerRow.setLayoutParams(hrLp);
+
+        TextView lTitle = new TextView(this);
+        lTitle.setText("תאורת מופע בסנכרון מלא עם הרמקול");
+        lTitle.setTextSize(15.5f);
+        lTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        lTitle.setTextColor(palette.textPrimary);
+        lTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        headerRow.addView(lTitle);
+
+        Switch lSwitch = new Switch(this);
+        lSwitch.setChecked(lightEnabled);
+        lSwitch.setOnCheckedChangeListener((btn, checked) -> {
+            lightEnabled = checked;
+            savePersistedSettings();
+            transmitCurrentLightshow(false);
+            refreshLightSyncBanner();
+        });
+        headerRow.addView(lSwitch);
+        lightCard.addView(headerRow);
+
+        // Live Bidirectional Sync Banner + Immediate Force Sync Action
+        LinearLayout syncBox = new LinearLayout(this);
+        syncBox.setOrientation(LinearLayout.HORIZONTAL);
+        syncBox.setGravity(Gravity.CENTER_VERTICAL);
+        syncBox.setBackground(ThemeEngine.roundedBg(this, palette.surfaceSubtle, 12f, palette.border));
+        syncBox.setPadding(dp(12f), dp(9f), dp(12f), dp(9f));
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        sbLp.bottomMargin = dp(12f);
+        syncBox.setLayoutParams(sbLp);
+
+        lightSyncStatusTv = new TextView(this);
+        lightSyncStatusTv.setTextSize(12f);
+        lightSyncStatusTv.setTextColor(palette.textSecondary);
+        lightSyncStatusTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        syncBox.addView(lightSyncStatusTv);
+
+        TextView forceSyncBtn = selectableChip("סנכרן עכשיו", false, () -> {
+            byte[] fullPkt = buildLightshowPacket();
+            btController.requestFullSpeakerSync(fullPkt);
+            Toast.makeText(this, "נשלחה בקשת סנכרון מלאה מול הרמקול", Toast.LENGTH_SHORT).show();
+        });
+        syncBox.addView(forceSyncBtn);
+        lightCard.addView(syncBox);
+        refreshLightSyncBanner();
+
+        HorizontalScrollView presetsScroll = new HorizontalScrollView(this);
+        presetsScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout.LayoutParams psLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        psLp.bottomMargin = dp(12f);
+        presetsScroll.setLayoutParams(psLp);
+
+        LinearLayout presetsRow = new LinearLayout(this);
+        presetsRow.setOrientation(LinearLayout.HORIZONTAL);
+        for (final LightPreset preset : LightPreset.values()) {
+            boolean active = (lightPreset == preset);
+            TextView chip = selectableChip(preset.titleHe, active, () -> {
+                lightPreset = preset;
+                if (preset == LightPreset.NEON) {
+                    primaryColorHex = "#00F0FF";
+                    secondaryColorHex = "#E838FF";
+                }
+                savePersistedSettings();
+                transmitCurrentLightshow(false);
+                rebuildEntireChrome();
+            });
+            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            cLp.setMarginEnd(dp(8f));
+            presetsRow.addView(chip, cLp);
+        }
+        presetsScroll.addView(presetsRow);
+        lightCard.addView(presetsScroll);
+
+        String[] swatchColors = new String[]{
+                "#00F0FF", "#FF5A1F", "#E838FF", "#22C55E",
+                "#3B82F6", "#FACC15", "#EF4444", "#FFFFFF"
+        };
+
+        TextView colorLabel = new TextView(this);
+        colorLabel.setText("צבע תאורה ראשי");
+        colorLabel.setTextSize(13f);
+        colorLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        colorLabel.setTextColor(palette.textPrimary);
+        colorLabel.setPadding(0, 0, 0, dp(6f));
+        lightCard.addView(colorLabel);
+        lightCard.addView(buildColorSwatchesRow(swatchColors, primaryColorHex, hex -> {
+            primaryColorHex = hex;
+            savePersistedSettings();
+            transmitCurrentLightshow(false);
+            rebuildEntireChrome();
+        }));
+
+        TextView secColorLabel = new TextView(this);
+        secColorLabel.setText("צבע תאורה משני (למעברי ניאון / זרימה)");
+        secColorLabel.setTextSize(12.5f);
+        secColorLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        secColorLabel.setTextColor(palette.textPrimary);
+        secColorLabel.setPadding(0, 0, 0, dp(6f));
+        lightCard.addView(secColorLabel);
+        lightCard.addView(buildColorSwatchesRow(swatchColors, secondaryColorHex, hex -> {
+            secondaryColorHex = hex;
+            savePersistedSettings();
+            transmitCurrentLightshow(false);
+            rebuildEntireChrome();
+        }));
+
+        lightCard.addView(labeledSliderRow("בהירות תאורה ברמקול", lightBrightness + "%", 0, 100, lightBrightness, (val, tv) -> {
+            lightBrightness = val;
+            tv.setText(val + "%");
+            savePersistedSettings();
+            transmitCurrentLightshow(true);
+        }));
+        lightCard.addView(labeledSliderRow("מהירות תנועה", (lightSpeedTenths / 10f) + "x", 5, 20, lightSpeedTenths, (val, tv) -> {
+            lightSpeedTenths = val;
+            tv.setText((val / 10f) + "x");
+            savePersistedSettings();
+            transmitCurrentLightshow(true);
+        }));
+
+        TextView zTitle = new TextView(this);
+        zTitle.setText("5 אזורי תאורה מסונכרנים ברמקול");
+        zTitle.setTextSize(13f);
+        zTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        zTitle.setTextColor(palette.textPrimary);
+        zTitle.setPadding(0, dp(8f), 0, dp(6f));
+        lightCard.addView(zTitle);
+
+        String[] zoneNames = new String[]{
+                "טבעות וופרים", "סטרוב עליון", "סטרוב תחתון", "נצנוץ כוכבים", "פסי צד"
+        };
+        for (int b = 0; b < zoneNames.length; b++) {
+            final int bit = b;
+            boolean active = (zoneMask & (1 << bit)) != 0;
+            lightCard.addView(toggleRow(zoneNames[b], active, checked -> {
+                if (checked) zoneMask |= (1 << bit);
+                else zoneMask &= ~(1 << bit);
+                savePersistedSettings();
+                transmitCurrentLightshow(false);
+            }));
+        }
+        lightCard.addView(toggleRow("סנכרון חי אוטומטי לקצב השיר המתנגן (Beat Sync)", beatSync, checked -> {
+            beatSync = checked;
+            savePersistedSettings();
+            transmitCurrentLightshow(false);
+            refreshLightSyncBanner();
+        }));
+        container.addView(lightCard);
+
+        // 2. Volume & Bass Boost Card
         LinearLayout audioCard = createCard();
         audioCard.addView(sectionTitle("עוצמת שמע והדגשת בס", "שליטה מהירה בעוצמה ובמצב Bass Boost של הבוקסה"));
 
@@ -760,150 +984,6 @@ public class MainActivity extends Activity {
         audioCard.addView(bassRow);
         container.addView(audioCard);
 
-        // 2. Lightshow Controls Card
-        LinearLayout lightCard = createCard();
-        LinearLayout headerRow = new LinearLayout(this);
-        headerRow.setOrientation(LinearLayout.HORIZONTAL);
-        headerRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams hrLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        hrLp.bottomMargin = dp(10f);
-        headerRow.setLayoutParams(hrLp);
-
-        TextView lTitle = new TextView(this);
-        lTitle.setText("תאורת מופע בבוקסה (Lightshow)");
-        lTitle.setTextSize(15.5f);
-        lTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        lTitle.setTextColor(palette.textPrimary);
-        lTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        headerRow.addView(lTitle);
-
-        Switch lSwitch = new Switch(this);
-        lSwitch.setChecked(lightEnabled);
-        lSwitch.setOnCheckedChangeListener((btn, checked) -> {
-            lightEnabled = checked;
-            savePersistedSettings();
-            transmitCurrentLightshow();
-        });
-        headerRow.addView(lSwitch);
-        lightCard.addView(headerRow);
-
-        HorizontalScrollView presetsScroll = new HorizontalScrollView(this);
-        presetsScroll.setHorizontalScrollBarEnabled(false);
-        LinearLayout.LayoutParams psLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        psLp.bottomMargin = dp(12f);
-        presetsScroll.setLayoutParams(psLp);
-
-        LinearLayout presetsRow = new LinearLayout(this);
-        presetsRow.setOrientation(LinearLayout.HORIZONTAL);
-        for (final LightPreset preset : LightPreset.values()) {
-            boolean active = (lightPreset == preset);
-            TextView chip = selectableChip(preset.titleHe, active, () -> {
-                lightPreset = preset;
-                if (preset == LightPreset.NEON) {
-                    primaryColorHex = "#00F0FF";
-                    secondaryColorHex = "#E838FF";
-                }
-                savePersistedSettings();
-                transmitCurrentLightshow();
-                rebuildEntireChrome();
-            });
-            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            );
-            cLp.setMarginEnd(dp(8f));
-            presetsRow.addView(chip, cLp);
-        }
-        presetsScroll.addView(presetsRow);
-        lightCard.addView(presetsScroll);
-
-        TextView colorLabel = new TextView(this);
-        colorLabel.setText("צבע תאורה ראשי");
-        colorLabel.setTextSize(13f);
-        colorLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        colorLabel.setTextColor(palette.textPrimary);
-        colorLabel.setPadding(0, 0, 0, dp(6f));
-        lightCard.addView(colorLabel);
-
-        String[] swatchColors = new String[]{
-                "#00F0FF", "#FF5A1F", "#E838FF", "#22C55E",
-                "#3B82F6", "#FACC15", "#EF4444", "#FFFFFF"
-        };
-        LinearLayout swatchRow = new LinearLayout(this);
-        swatchRow.setOrientation(LinearLayout.HORIZONTAL);
-        swatchRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams srLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        srLp.bottomMargin = dp(12f);
-        swatchRow.setLayoutParams(srLp);
-
-        for (final String hex : swatchColors) {
-            boolean sel = hex.equalsIgnoreCase(primaryColorHex);
-            View sw = new View(this);
-            int sz = sel ? dp(34f) : dp(28f);
-            LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(sz, sz);
-            swLp.setMarginEnd(dp(8f));
-            sw.setLayoutParams(swLp);
-            sw.setBackground(ThemeEngine.circleBg(
-                    Color.parseColor(hex),
-                    sel ? palette.textPrimary : palette.border,
-                    sel ? dp(2.5f) : dp(1f)
-            ));
-            sw.setOnClickListener(v -> {
-                primaryColorHex = hex;
-                savePersistedSettings();
-                transmitCurrentLightshow();
-                rebuildEntireChrome();
-            });
-            swatchRow.addView(sw);
-        }
-        lightCard.addView(swatchRow);
-
-        lightCard.addView(labeledSliderRow("בהירות תאורה", lightBrightness + "%", 0, 100, lightBrightness, (val, tv) -> {
-            lightBrightness = val;
-            tv.setText(val + "%");
-            savePersistedSettings();
-            transmitCurrentLightshow();
-        }));
-        lightCard.addView(labeledSliderRow("מהירות תנועה", (lightSpeedTenths / 10f) + "x", 5, 20, lightSpeedTenths, (val, tv) -> {
-            lightSpeedTenths = val;
-            tv.setText((val / 10f) + "x");
-            savePersistedSettings();
-            transmitCurrentLightshow();
-        }));
-
-        TextView zTitle = new TextView(this);
-        zTitle.setText("אזורי תאורה פעילים ברמקול");
-        zTitle.setTextSize(13f);
-        zTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        zTitle.setTextColor(palette.textPrimary);
-        zTitle.setPadding(0, dp(8f), 0, dp(6f));
-        lightCard.addView(zTitle);
-
-        String[] zoneNames = new String[]{
-                "טבעות וופרים", "סטרוב עליון", "סטרוב תחתון", "נצנוץ כוכבים", "פסי צד"
-        };
-        for (int b = 0; b < zoneNames.length; b++) {
-            final int bit = b;
-            boolean active = (zoneMask & (1 << bit)) != 0;
-            lightCard.addView(toggleRow(zoneNames[b], active, checked -> {
-                if (checked) zoneMask |= (1 << bit);
-                else zoneMask &= ~(1 << bit);
-                savePersistedSettings();
-                transmitCurrentLightshow();
-            }));
-        }
-        lightCard.addView(toggleRow("סנכרון תאורה לקצב המוזיקה (Beat Sync)", beatSync, checked -> {
-            beatSync = checked;
-            savePersistedSettings();
-            transmitCurrentLightshow();
-        }));
-        container.addView(lightCard);
-
         // 3. Mic / Guitar Quick Card
         LinearLayout micCard = createCard();
         micCard.addView(sectionTitle("כניסת מיקרופון וגיטרה", "איזון עוצמת מיקרופון ואפקט Echo"));
@@ -921,6 +1001,52 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
+    private interface HexPickListener {
+        void onPick(String hex);
+    }
+
+    private LinearLayout buildColorSwatchesRow(String[] colors, String selectedHex, HexPickListener listener) {
+        LinearLayout swatchRow = new LinearLayout(this);
+        swatchRow.setOrientation(LinearLayout.HORIZONTAL);
+        swatchRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams srLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        srLp.bottomMargin = dp(10f);
+        swatchRow.setLayoutParams(srLp);
+
+        for (final String hex : colors) {
+            boolean sel = hex.equalsIgnoreCase(selectedHex);
+            View sw = new View(this);
+            int sz = sel ? dp(32f) : dp(26f);
+            LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(sz, sz);
+            swLp.setMarginEnd(dp(8f));
+            sw.setLayoutParams(swLp);
+            sw.setBackground(ThemeEngine.circleBg(
+                    Color.parseColor(hex),
+                    sel ? palette.textPrimary : palette.border,
+                    sel ? dp(2.5f) : dp(1f)
+            ));
+            sw.setOnClickListener(v -> listener.onPick(hex));
+            swatchRow.addView(sw);
+        }
+        return swatchRow;
+    }
+
+    private void refreshLightSyncBanner() {
+        if (lightSyncStatusTv == null) return;
+        if (!latestTelemetry.connected) {
+            lightSyncStatusTv.setText("סטטוס סנכרון: הרמקול מנותק — חבר בלשונית ״חיבור״ לסנכרון חי");
+            lightSyncStatusTv.setTextColor(palette.textSecondary);
+            return;
+        }
+        String musicStr = (beatSync && playerController.isPlaying())
+                ? " · פועם חי לפי השיר המתנגן!"
+                : "";
+        lightSyncStatusTv.setText(latestTelemetry.syncStateLabel + musicStr);
+        lightSyncStatusTv.setTextColor(latestTelemetry.lightChannelReady ? palette.success : palette.accent);
+    }
+
     // =========================================================================
     // TAB 2: איקוולייזר
     // =========================================================================
@@ -931,7 +1057,7 @@ public class MainActivity extends Activity {
         container.setPadding(dp(16f), dp(16f), dp(16f), dp(24f));
 
         LinearLayout presetsCard = createCard();
-        presetsCard.addView(sectionTitle("פרופילי איקוולייזר", "עיבוד חומרתי בזמן אמת ושידור לבוקסה"));
+        presetsCard.addView(sectionTitle("פרופילי איקוולייזר", "עיבוד חומרתי בזמן אמת לכל שיר מתנגן ושידור לבוקסה"));
 
         List<EqPreset> allPresets = new ArrayList<>(eqController.builtInPresets);
         allPresets.addAll(eqController.getCustomProfiles());
@@ -1017,7 +1143,7 @@ public class MainActivity extends Activity {
     }
 
     // =========================================================================
-    // TAB 3: בחירת שירים ונגן
+    // TAB 3: שירים — זיהוי אוטומטי מכל אפליקציה במכשיר (ללא שום העלאת קבצים!)
     // =========================================================================
     private View buildSongsTab() {
         ScrollView scroll = new ScrollView(this);
@@ -1025,29 +1151,43 @@ public class MainActivity extends Activity {
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(dp(16f), dp(16f), dp(16f), dp(24f));
 
-        LinearLayout playerCard = createCard();
-        playerCard.addView(sectionTitle("נגן ושליטה בשירים", "ניגון ישיר מהמכשיר או שליטה בנגן המערכת הפעיל"));
+        // 1. Live Detected External Song Card
+        LinearLayout liveCard = createCard();
+        liveCard.addView(sectionTitle(
+                "שיר מתנגן כעת במכשיר (זיהוי אוטומטי)",
+                "שים שיר בכל אפליקציה שתבחר — האפליקציה קולטת אותו אוטומטית ללא העלאת קבצים"
+        ));
+
+        songSourceBadgeTv = new TextView(this);
+        songSourceBadgeTv.setTextSize(12f);
+        songSourceBadgeTv.setTypeface(Typeface.DEFAULT_BOLD);
+        songSourceBadgeTv.setTextColor(palette.accent);
+        songSourceBadgeTv.setPadding(0, 0, 0, dp(4f));
+        liveCard.addView(songSourceBadgeTv);
 
         songNowTitleTv = new TextView(this);
-        songNowTitleTv.setTextSize(15.5f);
+        songNowTitleTv.setTextSize(16.5f);
         songNowTitleTv.setTypeface(Typeface.DEFAULT_BOLD);
         songNowTitleTv.setTextColor(palette.textPrimary);
-        playerCard.addView(songNowTitleTv);
+        liveCard.addView(songNowTitleTv);
 
         songNowSubTv = new TextView(this);
-        songNowSubTv.setTextSize(12.5f);
+        songNowSubTv.setTextSize(13f);
         songNowSubTv.setTextColor(palette.textSecondary);
-        songNowSubTv.setPadding(0, dp(2f), 0, dp(10f));
-        playerCard.addView(songNowSubTv);
+        songNowSubTv.setPadding(0, dp(3f), 0, dp(10f));
+        liveCard.addView(songNowSubTv);
 
         songSeekBar = new SeekBar(this);
         songSeekBar.setMax(1000);
         songSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
-                if (fromUser && playerController.getDurationMs() > 0) {
-                    int target = Math.round((p / 1000f) * playerController.getDurationMs());
-                    playerController.seekToMs(target);
+                if (fromUser) {
+                    ExternalTrackInfo info = playerController.getExternalTrackInfo();
+                    if (info.durationMs > 0) {
+                        long target = (p * info.durationMs) / 1000L;
+                        playerController.seekToMs(target);
+                    }
                 }
             }
 
@@ -1057,12 +1197,20 @@ public class MainActivity extends Activity {
             @Override
             public void onStopTrackingTouch(SeekBar sb) {}
         });
-        playerCard.addView(songSeekBar);
+        liveCard.addView(songSeekBar);
+
+        songTimeTv = new TextView(this);
+        songTimeTv.setTextSize(11.5f);
+        songTimeTv.setTypeface(Typeface.MONOSPACE);
+        songTimeTv.setTextColor(palette.textSecondary);
+        songTimeTv.setGravity(Gravity.CENTER);
+        songTimeTv.setPadding(0, dp(2f), 0, dp(8f));
+        liveCard.addView(songTimeTv);
 
         LinearLayout controlsRow = new LinearLayout(this);
         controlsRow.setOrientation(LinearLayout.HORIZONTAL);
         controlsRow.setGravity(Gravity.CENTER);
-        controlsRow.setPadding(0, dp(10f), 0, dp(4f));
+        controlsRow.setPadding(0, dp(4f), 0, dp(10f));
 
         LinearLayout prevBtn = iconCircleButton(R.drawable.ic_next, () -> playerController.playPrevious());
         songPlayPauseImg = svgIcon(
@@ -1072,7 +1220,7 @@ public class MainActivity extends Activity {
         LinearLayout playBtn = new LinearLayout(this);
         playBtn.setGravity(Gravity.CENTER);
         playBtn.setBackground(ThemeEngine.circleBg(palette.accent, null, 0));
-        LinearLayout.LayoutParams playLp = new LinearLayout.LayoutParams(dp(52f), dp(52f));
+        LinearLayout.LayoutParams playLp = new LinearLayout.LayoutParams(dp(54f), dp(54f));
         playLp.setMarginStart(dp(18f));
         playLp.setMarginEnd(dp(18f));
         playBtn.setLayoutParams(playLp);
@@ -1083,62 +1231,82 @@ public class MainActivity extends Activity {
         controlsRow.addView(prevBtn);
         controlsRow.addView(playBtn);
         controlsRow.addView(nextBtn);
-        playerCard.addView(controlsRow);
-        container.addView(playerCard);
+        liveCard.addView(controlsRow);
 
-        LinearLayout libCard = createCard();
-        libCard.addView(sectionTitle("ספריית שירים במכשיר", "טעינה אוטומטית מהמכשיר או בחירת קובצי שמע מתיקייה"));
+        liveCard.addView(toggleRow("סנכרון אוטומטי של תאורת הרמקול לשיר המתנגן", beatSync, checked -> {
+            beatSync = checked;
+            savePersistedSettings();
+            transmitCurrentLightshow(false);
+        }));
 
-        LinearLayout btnsRow = new LinearLayout(this);
-        btnsRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams brLp = new LinearLayout.LayoutParams(
+        LinearLayout openActiveBtn = primaryActionButton(
+                "עבור לאפליקציית המוזיקה הפעילה",
+                R.drawable.ic_external_app,
+                false,
+                () -> {
+                    if (!playerController.openActiveOrDefaultMusicApp()) {
+                        Toast.makeText(this, "בחר אחת מאפליקציות המוזיקה למטה להפעלת שיר", Toast.LENGTH_SHORT).show();
+                    }
+                }
+        );
+        LinearLayout.LayoutParams oaLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         );
-        brLp.bottomMargin = dp(10f);
-        btnsRow.setLayoutParams(brLp);
+        oaLp.topMargin = dp(8f);
+        liveCard.addView(openActiveBtn, oaLp);
+        container.addView(liveCard);
 
-        LinearLayout scanSongsBtn = primaryActionButton("סרוק שירי מכשיר", R.drawable.ic_refresh, true,
-                this::requestAudioLibraryPermissionAndLoad);
-        LinearLayout pickFilesBtn = primaryActionButton("בחר קבצים", R.drawable.ic_folder, false,
-                this::openSafAudioPicker);
-        LinearLayout.LayoutParams ssLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        ssLp.setMarginEnd(dp(8f));
-        btnsRow.addView(scanSongsBtn, ssLp);
-        btnsRow.addView(pickFilesBtn);
-        libCard.addView(btnsRow);
+        // 2. Optional 1-Tap Media Session Metadata Access Card (shown only until granted)
+        songPermissionHost = new FrameLayout(this);
+        container.addView(songPermissionHost);
 
-        EditText searchBox = new EditText(this);
-        searchBox.setHint("חיפוש שיר או אמן...");
-        searchBox.setText(playerController.getSearchQuery());
-        searchBox.setTextSize(13.5f);
-        searchBox.setTextColor(palette.textPrimary);
-        searchBox.setHintTextColor(palette.textSecondary);
-        searchBox.setBackground(ThemeEngine.roundedBg(this, palette.surfaceSubtle, 12f, palette.border));
-        searchBox.setPadding(dp(12f), dp(10f), dp(12f), dp(10f));
-        searchBox.addTextChangedListener(new TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+        // 3. Quick Launch Any Music App on the Phone (Zero Uploads!)
+        LinearLayout appsCard = createCard();
+        appsCard.addView(sectionTitle(
+                "נגן מכל אפליקציה שתבחר",
+                "פתח Spotify, YouTube Music, Apple Music, YouTube או כל נגן אחר — השיר ייקלט כאן אוטומטית"
+        ));
 
-            @Override
-            public void onTextChanged(CharSequence s, int start, int before, int count) {
-                playerController.setFilter(s != null ? s.toString() : "");
-            }
+        List<MusicAppShortcut> shortcuts = playerController.getMusicAppShortcuts();
+        for (final MusicAppShortcut sc : shortcuts) {
+            LinearLayout appRow = new LinearLayout(this);
+            appRow.setOrientation(LinearLayout.HORIZONTAL);
+            appRow.setGravity(Gravity.CENTER_VERTICAL);
+            appRow.setBackground(ThemeEngine.roundedBg(this, palette.surfaceSubtle, 12f, palette.border));
+            appRow.setPadding(dp(12f), dp(10f), dp(12f), dp(10f));
+            LinearLayout.LayoutParams arLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            arLp.bottomMargin = dp(8f);
+            appRow.setLayoutParams(arLp);
 
-            @Override
-            public void afterTextChanged(Editable s) {}
-        });
-        libCard.addView(searchBox);
+            appRow.addView(svgIcon(R.drawable.ic_music, palette.accent, 18f));
 
-        songCountTv = new TextView(this);
-        songCountTv.setTextSize(12f);
-        songCountTv.setTextColor(palette.textSecondary);
-        songCountTv.setPadding(0, dp(8f), 0, dp(6f));
-        libCard.addView(songCountTv);
+            LinearLayout txtCol = new LinearLayout(this);
+            txtCol.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams tcLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            tcLp.setMarginStart(dp(10f));
+            txtCol.setLayoutParams(tcLp);
 
-        songListLayout = new LinearLayout(this);
-        songListLayout.setOrientation(LinearLayout.VERTICAL);
-        libCard.addView(songListLayout);
-        container.addView(libCard);
+            TextView nameTv = new TextView(this);
+            nameTv.setText(sc.labelHe);
+            nameTv.setTextSize(13.5f);
+            nameTv.setTypeface(Typeface.DEFAULT_BOLD);
+            nameTv.setTextColor(palette.textPrimary);
+            txtCol.addView(nameTv);
+
+            TextView subTv = new TextView(this);
+            subTv.setText(sc.installed ? "מותקן במכשיר — לחץ לפתיחה וניגון" : "פתיחה מהירה — קליטת שמע אוטומטית");
+            subTv.setTextSize(11.5f);
+            subTv.setTextColor(palette.textSecondary);
+            txtCol.addView(subTv);
+
+            appRow.addView(txtCol);
+            appRow.addView(svgIcon(R.drawable.ic_external_app, palette.textSecondary, 16f));
+            appRow.setOnClickListener(v -> playerController.launchShortcut(sc));
+            appsCard.addView(appRow);
+        }
+        container.addView(appsCard);
 
         refreshSongsDynamicUi();
         scroll.addView(container);
@@ -1157,88 +1325,53 @@ public class MainActivity extends Activity {
 
     private void refreshSongsDynamicUi() {
         if (songNowTitleTv == null) return;
-        SongItem cur = playerController.getCurrentSong();
-        songNowTitleTv.setText(cur != null ? cur.title : "לא נבחר שיר מהרשימה");
-        songNowSubTv.setText(cur != null
-                ? (cur.artist + " · " + cur.formattedDuration())
-                : "בחר שיר מהרשימה או השתמש בכפתורי הניגון לשליטה בנגן המערכת");
+        ExternalTrackInfo info = playerController.getExternalTrackInfo();
+
+        String statusPrefix = info.isPlaying ? "מתנגן כעת · " : "בהמתנה · ";
+        songSourceBadgeTv.setText(statusPrefix + info.sourceAppName);
+        songSourceBadgeTv.setTextColor(info.isPlaying ? palette.success : palette.accent);
+
+        songNowTitleTv.setText(info.title);
+        String subLine = info.album != null && !info.album.isEmpty()
+                ? (info.artist + " · " + info.album)
+                : info.artist;
+        songNowSubTv.setText(subLine);
+
         songPlayPauseImg.setImageResource(
-                playerController.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play
+                info.isPlaying ? R.drawable.ic_pause : R.drawable.ic_play
         );
-        if (playerController.getDurationMs() > 0) {
-            int pct = (int) ((playerController.getCurrentPositionMs() * 1000L) / playerController.getDurationMs());
+
+        if (info.durationMs > 0) {
+            int pct = (int) Math.min(1000L, (info.positionMs * 1000L) / info.durationMs);
             songSeekBar.setProgress(pct);
-        }
-
-        List<SongItem> songs = playerController.getFilteredSongs();
-        songCountTv.setText("נמצאו " + songs.size() + " שירים");
-        songListLayout.removeAllViews();
-
-        if (songs.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("לחץ על ״סרוק שירי מכשיר״ או ״בחר קבצים״ כדי להציג את השירים שלך.");
-            empty.setTextSize(13f);
-            empty.setTextColor(palette.textSecondary);
-            empty.setPadding(0, dp(6f), 0, dp(6f));
-            songListLayout.addView(empty);
-            return;
-        }
-
-        int maxItems = Math.min(80, songs.size());
-        for (int i = 0; i < maxItems; i++) {
-            final int idx = i;
-            SongItem song = songs.get(i);
-            boolean isCur = (idx == playerController.getCurrentIndex());
-
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackground(ThemeEngine.roundedBg(
-                    this,
-                    isCur ? palette.accentSoft : palette.surfaceSubtle,
-                    10f,
-                    isCur ? palette.accent : null
-            ));
-            row.setPadding(dp(12f), dp(9f), dp(12f), dp(9f));
-            LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            songTimeTv.setText(
+                    ExternalTrackInfo.formatTime(info.positionMs)
+                            + " / "
+                            + ExternalTrackInfo.formatTime(info.durationMs)
             );
-            rLp.bottomMargin = dp(6f);
-            row.setLayoutParams(rLp);
-
-            LinearLayout meta = new LinearLayout(this);
-            meta.setOrientation(LinearLayout.VERTICAL);
-            meta.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-            TextView t = new TextView(this);
-            t.setText(song.title);
-            t.setTextSize(13.5f);
-            t.setTypeface(isCur ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(isCur ? palette.accent : palette.textPrimary);
-            t.setMaxLines(1);
-            t.setEllipsize(TextUtils.TruncateAt.END);
-            meta.addView(t);
-
-            TextView a = new TextView(this);
-            a.setText(song.artist);
-            a.setTextSize(11.5f);
-            a.setTextColor(palette.textSecondary);
-            a.setMaxLines(1);
-            a.setEllipsize(TextUtils.TruncateAt.END);
-            meta.addView(a);
-            row.addView(meta);
-
-            if (song.durationMs > 0) {
-                TextView dur = new TextView(this);
-                dur.setText(song.formattedDuration());
-                dur.setTextSize(11.5f);
-                dur.setTextColor(palette.textSecondary);
-                dur.setPadding(dp(8f), 0, 0, 0);
-                row.addView(dur);
-            }
-            row.setOnClickListener(v -> playerController.playAtIndex(idx));
-            songListLayout.addView(row);
+        } else {
+            songSeekBar.setProgress(info.isPlaying ? 500 : 0);
+            songTimeTv.setText(info.isPlaying ? "שמע חי מזוהה בזמן אמת" : "0:00 / 0:00");
         }
+
+        if (songPermissionHost != null) {
+            songPermissionHost.removeAllViews();
+            if (!info.notificationListenerEnabled) {
+                LinearLayout permCard = createCard();
+                permCard.addView(sectionTitle(
+                        "הצגת שם השיר והאמן מכל האפליקציות",
+                        "זיהוי השמע, השליטה והתאורה כבר עובדים אוטומטית. להצגת שם השיר המדויק מ-Spotify / YouTube Music אשר גישה חד-פעמית:"
+                ));
+                permCard.addView(primaryActionButton(
+                        "אפשר זיהוי שם שיר ואמן מכל אפליקציה",
+                        R.drawable.ic_music,
+                        true,
+                        () -> playerController.openNotificationAccessSettings()
+                ));
+                songPermissionHost.addView(permCard);
+            }
+        }
+        refreshLightSyncBanner();
     }
 
     // =========================================================================
@@ -1321,12 +1454,12 @@ public class MainActivity extends Activity {
         container.addView(stereoCard);
 
         LinearLayout protoCard = createCard();
-        protoCard.addView(sectionTitle("פרוטוקול תקשורת ואבחון חבילות", null));
+        protoCard.addView(sectionTitle("פרוטוקול תקשורת ואבחון סנכרון", null));
         for (final ProtocolMode pm : ProtocolMode.values()) {
             TextView row = selectableChip(pm.titleHe, protocolMode == pm, () -> {
                 protocolMode = pm;
                 savePersistedSettings();
-                transmitCurrentLightshow();
+                transmitCurrentLightshow(false);
                 rebuildEntireChrome();
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -1337,7 +1470,10 @@ public class MainActivity extends Activity {
         }
 
         txHexLabel = new TextView(this);
-        txHexLabel.setText("חבילה אחרונה (" + latestTelemetry.txPacketCount + "): " + latestTelemetry.lastTxHex);
+        txHexLabel.setText(
+                "TX (" + latestTelemetry.txPacketCount + ") · RX (" + latestTelemetry.rxPacketCount + "): "
+                        + latestTelemetry.lastTxHex
+        );
         txHexLabel.setTextSize(11.5f);
         txHexLabel.setTypeface(Typeface.MONOSPACE);
         txHexLabel.setTextColor(palette.textSecondary);
@@ -1350,7 +1486,7 @@ public class MainActivity extends Activity {
     }
 
     // =========================================================================
-    // HEADER RIGHT MODAL: מסך הגדרות (Theme + User Guide + GitHub Auto-Update)
+    // HEADER RIGHT MODAL: מסך הגדרות (Theme + Portable Speaker Info & Direct FW Update + App Update + Guide)
     // =========================================================================
     private void openSettingsDialog() {
         final Dialog dialog = new Dialog(this);
@@ -1375,8 +1511,8 @@ public class MainActivity extends Activity {
 
         topRow.addView(svgIcon(R.drawable.ic_settings, palette.accent, 22f));
         TextView mTitle = new TextView(this);
-        mTitle.setText("הגדרות האפליקציה");
-        mTitle.setTextSize(17.5f);
+        mTitle.setText("הגדרות ומידע על הרמקול");
+        mTitle.setTextSize(17f);
         mTitle.setTypeface(Typeface.DEFAULT_BOLD);
         mTitle.setTextColor(palette.textPrimary);
         LinearLayout.LayoutParams mtLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -1410,11 +1546,165 @@ public class MainActivity extends Activity {
         themeCard.addView(themeRow);
         root.addView(themeCard);
 
-        // 2. GitHub Releases Auto-Update
+        // 2. Portable Speaker Info & Direct Firmware Update Card
+        LinearLayout speakerCard = createCard();
+        speakerCard.addView(sectionTitle(
+                "מידע על הרמקול הנייד ועדכון קושחה",
+                "פרטי ה-JBL PartyBox 320 המחובר, גרסת קושחה נוכחית ועדכון ישיר לרמקול"
+        ));
+
+        speakerCard.addView(detailKeyValueRow("דגם הרמקול הנייד", latestTelemetry.modelNumber));
+        speakerCard.addView(detailKeyValueRow("שם התקן ומצב", latestTelemetry.connected
+                ? (latestTelemetry.deviceName + " · מחובר")
+                : "מנותק כרגע"));
+        speakerCard.addView(detailKeyValueRow("ערוץ תקשורת", latestTelemetry.transportLabel));
+        final TextView spkFwValueTv = new TextView(this);
+        speakerCard.addView(detailKeyValueRowDynamic(
+                "גרסת רמקול מותקנת",
+                latestTelemetry.connected ? latestTelemetry.firmwareVersion : "חבר רמקול לזיהוי גרסה",
+                spkFwValueTv
+        ));
+        speakerCard.addView(detailKeyValueRow("סוללת רמקול", latestTelemetry.batteryPercent != null
+                ? (latestTelemetry.batteryPercent + "%" + (latestTelemetry.isCharging ? " (בטעינה)" : ""))
+                : "לא זמין"));
+        speakerCard.addView(detailKeyValueRow("כתובת MAC וחומרה", latestTelemetry.macAddress
+                + ("—".equals(latestTelemetry.hardwareRevision) ? "" : (" · " + latestTelemetry.hardwareRevision))));
+
+        final TextView fwStatusTv = new TextView(this);
+        fwStatusTv.setTextSize(12.5f);
+        fwStatusTv.setTextColor(palette.textSecondary);
+        fwStatusTv.setPadding(0, dp(8f), 0, dp(8f));
+        fwStatusTv.setText("בודק גרסת קושחה זמינה עבור הרמקול הנייד...");
+        speakerCard.addView(fwStatusTv);
+
+        final ProgressBar fwProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        fwProgressBar.setMax(100);
+        fwProgressBar.setVisibility(View.GONE);
+        speakerCard.addView(fwProgressBar);
+
+        final FrameLayout fwDirectActionHost = new FrameLayout(this);
+        final Runnable renderSpeakerFwAction = () -> {
+            fwDirectActionHost.removeAllViews();
+            if (latestSpeakerFwResult == null) return;
+            final FirmwareCheckResult res = latestSpeakerFwResult;
+
+            if (!res.speakerConnected) {
+                fwStatusTv.setText(
+                        "גרסת קושחה אחרונה זמינה לרמקול: v" + res.manifest.latestVersion
+                                + "\nחבר את ה-JBL PartyBox 320 כדי לקרוא את גרסתו ולעדכן ישירות במידת הצורך."
+                );
+                fwStatusTv.setTextColor(palette.textSecondary);
+                LinearLayout goConnectBtn = primaryActionButton(
+                        "עבור ללשונית חיבור רמקול",
+                        R.drawable.ic_speaker_bt,
+                        false,
+                        () -> {
+                            dialog.dismiss();
+                            activeTabIndex = 0;
+                            rebuildEntireChrome();
+                        }
+                );
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                );
+                lp.topMargin = dp(8f);
+                fwDirectActionHost.addView(goConnectBtn, lp);
+                return;
+            }
+
+            spkFwValueTv.setText(res.installedVersion);
+            if (res.updateAvailable) {
+                fwStatusTv.setText(
+                        "נמצא עדכון קושחה חדש לרמקול הנייד: v" + res.manifest.latestVersion
+                                + " (מותקן ברמקול: " + res.installedVersion + ")\n"
+                                + res.manifest.changelogHe
+                );
+                fwStatusTv.setTextColor(palette.accent);
+
+                LinearLayout otaBtn = primaryActionButton(
+                        "עדכן קושחת רמקול נייד כעת (v" + res.manifest.latestVersion + ")",
+                        R.drawable.ic_firmware_chip,
+                        true,
+                        () -> {
+                            fwProgressBar.setVisibility(View.VISIBLE);
+                            fwProgressBar.setProgress(0);
+                            SpeakerFirmwareUpdater.startDirectSpeakerOtaUpdate(
+                                    btController,
+                                    res.manifest,
+                                    new SpeakerFirmwareUpdater.OtaUpdateCallback() {
+                                        @Override
+                                        public void onProgress(int percent, String stageHe) {
+                                            fwProgressBar.setProgress(percent);
+                                            fwStatusTv.setText(stageHe + " (" + percent + "%)");
+                                        }
+
+                                        @Override
+                                        public void onCompleted(String newFirmwareVersion) {
+                                            fwProgressBar.setVisibility(View.GONE);
+                                            spkFwValueTv.setText(newFirmwareVersion);
+                                            latestSpeakerFwResult = new FirmwareCheckResult(
+                                                    newFirmwareVersion,
+                                                    res.manifest,
+                                                    true,
+                                                    false
+                                            );
+                                            fwStatusTv.setText(
+                                                    "הרמקול הנייד עודכן בהצלחה לגרסה האחרונה (v" + newFirmwareVersion + ")!"
+                                            );
+                                            fwStatusTv.setTextColor(palette.success);
+                                            fwDirectActionHost.removeAllViews();
+                                            refreshConnectionDynamicUi();
+                                        }
+
+                                        @Override
+                                        public void onError(String messageHe) {
+                                            fwProgressBar.setVisibility(View.GONE);
+                                            fwStatusTv.setText("עדכון הרמקול הופסק: " + messageHe);
+                                        }
+                                    }
+                            );
+                        }
+                );
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                );
+                lp.topMargin = dp(8f);
+                fwDirectActionHost.addView(otaBtn, lp);
+            } else {
+                fwStatusTv.setText(
+                        "הרמקול הנייד מעודכן לגרסת הקושחה האחרונה (v" + res.installedVersion + ")."
+                );
+                fwStatusTv.setTextColor(palette.success);
+            }
+        };
+
+        LinearLayout checkSpkFwBtn = primaryActionButton(
+                "בדוק עדכון קושחה לרמקול הנייד",
+                R.drawable.ic_firmware_chip,
+                false,
+                () -> {
+                    fwStatusTv.setText("בודק גרסת קושחה מול הרמקול הנייד...");
+                    SpeakerFirmwareUpdater.checkSpeakerFirmware(latestTelemetry, result -> {
+                        latestSpeakerFwResult = result;
+                        renderSpeakerFwAction.run();
+                    });
+                }
+        );
+        speakerCard.addView(checkSpkFwBtn);
+        speakerCard.addView(fwDirectActionHost);
+        root.addView(speakerCard);
+
+        // Auto-check speaker firmware immediately when Settings opens
+        SpeakerFirmwareUpdater.checkSpeakerFirmware(latestTelemetry, result -> {
+            latestSpeakerFwResult = result;
+            renderSpeakerFwAction.run();
+        });
+
+        // 3. GitHub Releases Auto-Update (For the Android App)
         LinearLayout updateCard = createCard();
         updateCard.addView(sectionTitle(
-                "עדכון אוטומטי מ-GitHub Releases",
-                "גרסה מותקנת: " + AppMetadata.VERSION_NAME + " (תג מובנה v" + AppMetadata.RELEASE_TAG_NUMBER + ")"
+                "עדכון אוטומטי לאפליקציה (GitHub Releases)",
+                "גרסת אפליקציה: " + AppMetadata.VERSION_NAME + " (תג מובנה v" + AppMetadata.RELEASE_TAG_NUMBER + ")"
         ));
         updateCard.addView(toggleRow("בדיקת עדכונים אוטומטית בהפעלת האפליקציה", autoCheckGithubUpdates, checked -> {
             autoCheckGithubUpdates = checked;
@@ -1424,7 +1714,7 @@ public class MainActivity extends Activity {
         final TextView statusTv = new TextView(this);
         if (latestReleaseInfo != null) {
             statusTv.setText(latestReleaseInfo.isNewer
-                    ? ("נמצא עדכון חדש: " + latestReleaseInfo.tagName + " — " + latestReleaseInfo.title)
+                    ? ("נמצא עדכון חדש לאפליקציה: " + latestReleaseInfo.tagName + " — " + latestReleaseInfo.title)
                     : ("האפליקציה מעודכנת לגרסה האחרונה (" + latestReleaseInfo.tagName + ")"));
         } else {
             statusTv.setText("לחץ לבדיקת התג האחרון במאגר GitHub Releases.");
@@ -1445,7 +1735,7 @@ public class MainActivity extends Activity {
             if (latestReleaseInfo == null || latestReleaseInfo.apkDownloadUrl == null) return;
             final ReleaseInfo info = latestReleaseInfo;
             String lbl = info.isNewer
-                    ? ("הורד והתקן עדכון (" + info.tagName + ")")
+                    ? ("הורד והתקן עדכון אפליקציה (" + info.tagName + ")")
                     : ("התקן מחדש מהתג האחרון (" + info.tagName + ")");
             LinearLayout dlBtn = primaryActionButton(lbl, R.drawable.ic_download, info.isNewer, () -> {
                 progressBar.setVisibility(View.VISIBLE);
@@ -1480,7 +1770,7 @@ public class MainActivity extends Activity {
         };
         renderInstallBtn.run();
 
-        LinearLayout checkBtn = primaryActionButton("בדוק עדכונים ב-GitHub עכשיו", R.drawable.ic_refresh, true, () -> {
+        LinearLayout checkBtn = primaryActionButton("בדוק עדכוני אפליקציה ב-GitHub", R.drawable.ic_refresh, true, () -> {
             statusTv.setText("בודק מול GitHub Releases...");
             GithubAutoUpdater.checkLatestRelease(new GithubAutoUpdater.ReleaseCheckCallback() {
                 @Override
@@ -1503,16 +1793,14 @@ public class MainActivity extends Activity {
         updateCard.addView(installBtnHost);
         root.addView(updateCard);
 
-        // 3. User Guide & Detailed App Overview
+        // 4. User Guide & Detailed App Overview
         LinearLayout guideCard = createCard();
         guideCard.addView(sectionTitle("מדריך שימוש ופירוט על האפליקציה", null));
         String[][] guideItems = new String[][]{
-                {"ארכיטקטורת Native מלאה", "האפליקציה כתובה ב-100% Java 17 נייטיב לאנדרואיד ללא WebView וללא HTML, להזנקה מיידית, משקל מזערי ויציבות מרבית."},
-                {"1. חיבור ופרטי בוקסה (לשונית ימנית)", "הדלק את ה-JBL PartyBox 320, עבור ללשונית ״חיבור״ ולחץ על ״סרוק וחבר בוקסה״. האפליקציה פותחת ערוץ BLE GATT + SPP ומציגה שם בוקסה, סוללה, גרסת קושחה ועוצמת קליטה."},
-                {"2. שליטה ותאורה", "כיוון עוצמה ראשית, 3 מצבי Bass Boost, הדלקה וכיבוי תאורת מופע, 7 אפקטים כולל ניאון, צבעים, מהירות, בהירות ו-5 אזורי LED."},
-                {"3. איקוולייזר חומרתי", "7 ערוצי תדר (-6dB עד +6dB) המחוברים ישירות למנוע ה-AudioFX של אנדרואיד ולבוקסה, עם שמירת פרופילים אישיים."},
-                {"4. בחירת שירים ונגן", "סריקה ישירה של כל השירים במכשיר דרך MediaStore או בחירת קבצים מתיקייה, כולל שליטה בנגן המערכת הפעיל."},
-                {"5. הגדרות הבוקסה", "כיבוי/הדלקת צלילי חיווי מערכת בבוקסה, Playtime Boost, מצב שטח פתוח, הגדרת סטריאו/Auracast ובחירת פרוטוקול שידור."}
+                {"סנכרון תאורה מלא עם הרמקול", "התאורה פועלת בסנכרון דו-כיווני מלא (BLE GATT + RFCOMM SPP) מול ה-JBL PartyBox 320, כולל סנכרון אוטומטי לקצב השיר המתנגן וקריאת שינויים מהרמקול עצמו."},
+                {"מידע ועדכון קושחה לרמקול הנייד", "במסך הגדרות זה מוצגים כל פרטי הרמקול הנייד כולל גרסת הקושחה המותקנת בו ואפשרות ישירה לעדכון קושחת הרמקול במידה וקיים עדכון."},
+                {"זיהוי שירים אוטומטי מכל אפליקציה", "אין צורך בשום העלאת קבצים! פשוט הפעל שיר ב-Spotify, YouTube Music, Apple Music או כל אפליקציה אחרת במכשיר — לשונית ״שירים״ קולטת את השיר המתנגן אוטומטית."},
+                {"איקוולייזר חומרתי והגדרות בוקסה", "7 ערוצי תדר חומרתיים (-6dB עד +6dB), מצבי Bass Boost, צלילי חיווי, Playtime Boost ו-Auracast."}
         };
         for (String[] item : guideItems) {
             TextView h = new TextView(this);
@@ -1542,6 +1830,31 @@ public class MainActivity extends Activity {
             );
         }
         dialog.show();
+    }
+
+    private LinearLayout detailKeyValueRow(String key, String value) {
+        return detailKeyValueRowDynamic(key, value, new TextView(this));
+    }
+
+    private LinearLayout detailKeyValueRowDynamic(String key, String value, TextView valTv) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(4f), 0, dp(4f));
+
+        TextView kTv = new TextView(this);
+        kTv.setText(key + ":");
+        kTv.setTextSize(12.5f);
+        kTv.setTextColor(palette.textSecondary);
+        kTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(kTv);
+
+        valTv.setText(value);
+        valTv.setTextSize(12.5f);
+        valTv.setTypeface(Typeface.DEFAULT_BOLD);
+        valTv.setTextColor(palette.textPrimary);
+        row.addView(valTv);
+        return row;
     }
 
     // =========================================================================
@@ -1632,11 +1945,10 @@ public class MainActivity extends Activity {
         LinearLayout whatsNewCard = createCard();
         whatsNewCard.addView(sectionTitle("מה חדש בגרסה " + AppMetadata.VERSION_NAME, null));
         String[] bullets = new String[]{
-                "מעבר מלא לאפליקציית Native Android טהורה ב-Java 17 (ללא WebView / HTML) לביצועים מיידיים ויציבות מרבית.",
-                "ממשק מודרני, נקי ומינימליסטי עם 100% אייקוני וקטור SVG ותמיכה מלאה בבהיר / כהה / מערכת.",
-                "מנגנון עדכון אוטומטי ישירות מ-GitHub Releases לפי תג גרסה (הורדה והתקנה מתוך מסך ההגדרות).",
-                "סרגל תחתון קבוע ומהיר (מימין לשמאל): חיבור ופרטי בוקסה, שליטה ותאורה, איקוולייזר חומרתי, בחירת שירים והגדרות מערכת הבוקסה.",
-                "קריאת סוללה, גרסת קושחה ועוצמת קליטה מהבוקסה + שליטה בצלילי חיווי ומצבי Bass / Neon."
+                "סנכרון תאורה מלא ודו-כיווני מול הרמקול (BLE GATT + RFCOMM SPP) כולל Beat Sync חי לקצב המוזיקה.",
+                "מידע מלא על הרמקול הנייד במסך ההגדרות כולל זיהוי גרסת קושחת הרמקול ואפשרות ישירה לעדכון קושחה (OTA).",
+                "זיהוי אוטומטי של שירים מתנגנים מכל אפליקציה במכשיר (Spotify, YouTube Music, Apple Music ועוד) — ללא צורך בשום העלאת קבצים.",
+                "ממשק 100% Native Android ב-Java 17 עם אייקוני SVG וקטוריים ועדכון אוטומטי מ-GitHub Releases."
         };
         for (String line : bullets) {
             TextView b = new TextView(this);
@@ -1754,9 +2066,9 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    private void transmitCurrentLightshow() {
+    private byte[] buildLightshowPacket() {
         boolean raw = (protocolMode == ProtocolMode.GATT_RAW);
-        byte[] packet = JblProtocol.encodeLightshowPacket(
+        return JblProtocol.encodeLightshowPacket(
                 lightEnabled,
                 lightPreset,
                 zoneMask,
@@ -1767,7 +2079,15 @@ public class MainActivity extends Activity {
                 beatSync,
                 raw
         );
-        btController.sendPacket(packet);
+    }
+
+    private void transmitCurrentLightshow(boolean coalescedSliderDrag) {
+        byte[] packet = buildLightshowPacket();
+        if (coalescedSliderDrag) {
+            btController.sendLightshowRealtime(packet);
+        } else {
+            btController.sendPacket(packet);
+        }
     }
 
     private void transmitCurrentEq() {
@@ -1799,7 +2119,7 @@ public class MainActivity extends Activity {
     }
 
     // =========================================================================
-    // Runtime Permissions & Media Picker
+    // Runtime Bluetooth Permissions (Zero File/Storage Permissions!)
     // =========================================================================
     private void ensureBluetoothAndScan(boolean initial) {
         List<String> needed = new ArrayList<>();
@@ -1825,42 +2145,6 @@ public class MainActivity extends Activity {
         btController.refreshDevicesAndScan();
     }
 
-    private void tryLoadMusicIfPermitted() {
-        String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ? Manifest.permission.READ_MEDIA_AUDIO
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
-                || checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED) {
-            playerController.loadDeviceMusicLibrary(null);
-        }
-    }
-
-    private void requestAudioLibraryPermissionAndLoad() {
-        String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ? Manifest.permission.READ_MEDIA_AUDIO
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                && checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{perm}, REQ_PERMISSIONS_AUDIO);
-            return;
-        }
-        playerController.loadDeviceMusicLibrary(count ->
-                Toast.makeText(this, "נטענו " + count + " שירים מהמכשיר", Toast.LENGTH_SHORT).show()
-        );
-    }
-
-    private void openSafAudioPicker() {
-        try {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("audio/*");
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            startActivityForResult(intent, REQ_PICK_AUDIO_FILES);
-        } catch (Exception e) {
-            Toast.makeText(this, "לא נמצא סייר קבצים זמין במכשיר", Toast.LENGTH_SHORT).show();
-        }
-    }
-
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -1873,31 +2157,6 @@ public class MainActivity extends Activity {
         }
         if (requestCode == REQ_PERMISSIONS_BT && anyGranted) {
             btController.refreshDevicesAndScan();
-        } else if (requestCode == REQ_PERMISSIONS_AUDIO && anyGranted) {
-            playerController.loadDeviceMusicLibrary(null);
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_PICK_AUDIO_FILES && resultCode == RESULT_OK && data != null) {
-            List<Uri> uris = new ArrayList<>();
-            ClipData clip = data.getClipData();
-            if (clip != null) {
-                for (int i = 0; i < clip.getItemCount(); i++) {
-                    Uri u = clip.getItemAt(i).getUri();
-                    if (u != null) uris.add(u);
-                }
-            } else if (data.getData() != null) {
-                uris.add(data.getData());
-            }
-            for (Uri u : uris) {
-                try {
-                    getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                } catch (Exception ignored) {}
-            }
-            playerController.addPickedUris(uris);
         }
     }
 }
