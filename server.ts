@@ -57,32 +57,38 @@ const DEFAULT_SESSION: PersistedDeviceSession = {
 
 const SOURCE_ZIP_FILENAME = 'JBL-PartyBox-320-Native-Source.zip';
 
-function getSessionFilePath(_rootDir: string): string {
-  return '/tmp/gh_device_session.json';
+function getSessionFilePaths(rootDir: string): string[] {
+  return [
+    path.resolve(rootDir, '.gh_device_session.json'),
+    '/tmp/gh_device_session.json',
+  ];
 }
 
 function loadSession(rootDir: string): PersistedDeviceSession {
-  const file = getSessionFilePath(rootDir);
-  try {
-    if (fs.existsSync(file)) {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      return { ...DEFAULT_SESSION, ...raw };
+  for (const file of getSessionFilePaths(rootDir)) {
+    try {
+      if (fs.existsSync(file)) {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        return { ...DEFAULT_SESSION, ...raw };
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
   return { ...DEFAULT_SESSION };
 }
 
 function saveSession(rootDir: string, session: PersistedDeviceSession): void {
-  const file = getSessionFilePath(rootDir);
-  try {
-    fs.writeFileSync(file, JSON.stringify(session, null, 2), {
-      encoding: 'utf-8',
-      mode: 0o600,
-    });
-  } catch {
-    // ignore
+  const payload = JSON.stringify(session, null, 2);
+  for (const file of getSessionFilePaths(rootDir)) {
+    try {
+      fs.writeFileSync(file, payload, {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -600,7 +606,7 @@ with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
         if rel_dir.startswith('app/build'):
             continue
         for fn in filenames:
-            if fn.startswith('.env') and fn != '.env.example':
+            if (fn.startswith('.env') and fn != '.env.example') or fn == '.gh_device_session.json':
                 continue
             full = os.path.join(dirpath, fn)
             arc = os.path.relpath(full, root)

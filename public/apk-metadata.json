@@ -7,8 +7,8 @@
   "developer": "אש התורה",
   "minSdk": 24,
   "targetSdk": 34,
-  "apkSizeBytes": 79803,
-  "zipSizeBytes": 71079,
-  "sha256": "f3c520132db07f258f14fed2296fd7083f7e034a3fedcc3da7b8226a4933ddb3",
-  "builtAt": "2026-10-30T10:32:28.785846+00:00"
+  "apkSizeBytes": 75819,
+  "zipSizeBytes": 70833,
+  "sha256": "699fbb6aa2cc243bbd375c41867201f7e8b2ee5c5dded5e83ae3b874301630d2",
+  "builtAt": "2026-10-30T10:54:41.543227+00:00"
 }
