@@ -1,0 +1,80 @@
+name: CI — Native Android (Java 17) & Web Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  native-android-ci:
+    name: Native Android APK, JUnit Tests & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Run JUnit Unit Tests (Harman Protocol & GitHub Tag Updater)
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Run Android Lint Checks
+        run: gradle lintRelease --no-daemon
+
+      - name: Build Signed Release Native APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify Pure Native APK Structure (DEX present, Zero WebView HTML)
+        run: |
+          APK_PATH="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK_PATH"
+          unzip -l "$APK_PATH" | grep -q "classes.dex"
+          if unzip -l "$APK_PATH" | grep -q "assets/www"; then
+            echo "ERROR: WebView HTML assets found inside Native APK!"
+            exit 1
+          fi
+          cp "$APK_PATH" JBL-PartyBox-320-HE.apk
+          ls -lh JBL-PartyBox-320-HE.apk
+
+      - name: Upload Native APK & JUnit Test Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: JBL-PartyBox-320-HE-Native-APK
+          path: |
+            JBL-PartyBox-320-HE.apk
+            app/build/reports/tests/testDebugUnitTest/
+
+  web-preview-ci:
+    name: Web Companion TypeScript & Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies cleanly
+        run: npm install --legacy-peer-deps
+
+      - name: TypeScript typecheck
+        run: npm run lint
+
+      - name: Build web bundle
+        run: npm run build

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#F6F7F9" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="PartyBox 320" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <title>JBL PartyBox 320 — מרכז שליטה</title>
+    <meta
+      name="description"
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 — 100% Native Kotlin לאנדרואיד עם שליטה בתאורה, איקוולייזר 7 ערוצים, בחירת שירים ועדכון אוטומטי מ-GitHub Releases."
+    />
+    <meta property="og:title" content="JBL PartyBox 320 — מרכז שליטה" />
+    <meta
+      property="og:description"
+      content="אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 — 100% Native Kotlin לאנדרואיד עם תאורת מופע, איקוולייזר, בחירת שירים ועדכון אוטומטי מ-GitHub."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      try {
+        var mode = localStorage.getItem('jbl_pb320_theme_native_v1') || 'system';
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (mode === 'dark' || (mode === 'system' && prefersDark)) {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+      } catch (e) {}
+    </script>
+  </head>
+  <body class="min-h-dvh overflow-x-clip bg-[#F6F7F9] text-slate-900 dark:bg-[#0B0F17] dark:text-slate-100 antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

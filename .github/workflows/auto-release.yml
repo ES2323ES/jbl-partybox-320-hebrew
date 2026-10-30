@@ -1,0 +1,179 @@
+name: Build & Publish Native Android Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Signed Native APK & Publish Detailed Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with full history & tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release tag and version details
+        id: meta
+        run: |
+          git fetch --tags --force
+          EXISTING_ON_HEAD=$(git tag --points-at HEAD | grep -E '^v[0-9]+' || true)
+          if [ -n "$EXISTING_ON_HEAD" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD already tagged with $EXISTING_ON_HEAD — skipping duplicate auto-release."
+            exit 0
+          fi
+
+          PREV_TAG=""
+          MAX_NUM=0
+          for t in $(git tag -l 'v*'); do
+            NUM=$(echo "$t" | sed -E 's/^v([0-9]+)$/\1/')
+            if [[ "$NUM" =~ ^[0-9]+$ ]] && [ "$NUM" -gt "$MAX_NUM" ]; then
+              MAX_NUM="$NUM"
+              PREV_TAG="$t"
+            fi
+          done
+
+          NEXT_NUM=$((MAX_NUM + 1))
+          NEXT_TAG="v${NEXT_NUM}"
+          APP_VER=$(grep 'versionName =' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_CODE=$(grep 'versionCode =' app/build.gradle.kts | head -n1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "next_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "app_ver=${APP_VER:-0.3.0}" >> "$GITHUB_OUTPUT"
+          echo "ver_code=${VERSION_CODE:-5}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup JDK 17
+        if: steps.meta.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle 8.9
+        if: steps.meta.outputs.skip == 'false'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Setup Android SDK
+        if: steps.meta.outputs.skip == 'false'
+        uses: android-actions/setup-android@v3
+
+      - name: Run Unit Tests & Compile Signed Native Android APK
+        if: steps.meta.outputs.skip == 'false'
+        run: gradle testDebugUnitTest assembleRelease --no-daemon --stacktrace
+
+      - name: Package APK, ZIP & Generate Rich Hebrew Release Notes
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          NEXT_TAG: ${{ steps.meta.outputs.next_tag }}
+          PREV_TAG: ${{ steps.meta.outputs.prev_tag }}
+          APP_VER: ${{ steps.meta.outputs.app_ver }}
+          VER_CODE: ${{ steps.meta.outputs.ver_code }}
+        run: |
+          mkdir -p release-dist
+          cp app/build/outputs/apk/release/app-release.apk release-dist/JBL-PartyBox-320-HE.apk
+
+          cat << 'EOF' > release-dist/README-INSTALL-HE.txt
+          JBL PartyBox Stage 320 — אפליקציית שליטה נייטיב בעברית (100% Native Android)
+          פיתוח: "אש התורה"
+          GitHub: https://github.com/ES2323ES
+          מתמחים טופ: https://mitmachim.top/user/%D7%90%D7%A9-%D7%94%D7%AA%D7%95%D7%A8%D7%94
+
+          הוראות התקנה:
+          1. העבר או הורד את הקובץ JBL-PartyBox-320-HE.apk למכשיר האנדרואיד (אנדרואיד 7.0 ומעלה).
+          2. פתח את הקובץ ואשר התקנה ממקור זה במידת הצורך.
+          3. לעדכונים הבאים ניתן להשתמש בכפתור "עדכון אוטומטי מ-GitHub Releases" בתוך מסך ההגדרות (בצד ימין למעלה).
+          * הערה: אם הותקנה בעבר גרסת ה-WebView הישנה (0.2.x), מומלץ להסיר אותה פעם אחת לפני התקנת גרסת ה-Native החדשה.
+          EOF
+
+          (cd release-dist && zip -9 JBL-PartyBox-320-HE-APK.zip JBL-PartyBox-320-HE.apk README-INSTALL-HE.txt)
+
+          APK_SHA=$(sha256sum release-dist/JBL-PartyBox-320-HE.apk | awk '{print $1}')
+          ZIP_SHA=$(sha256sum release-dist/JBL-PartyBox-320-HE-APK.zip | awk '{print $1}')
+          APK_SIZE=$(du -h release-dist/JBL-PartyBox-320-HE.apk | awk '{print $1}')
+          ZIP_SIZE=$(du -h release-dist/JBL-PartyBox-320-HE-APK.zip | awk '{print $1}')
+
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS_LOG=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (\`%h\`)" | head -n 15 || true)
+          else
+            COMMITS_LOG=$(git log -n 8 --pretty=format:"- %s (\`%h\`)" || true)
+          fi
+          if [ -z "$COMMITS_LOG" ]; then
+            COMMITS_LOG="- בנייה ושחרור גרסת Native Android מעודכנת"
+          fi
+
+          cat << EOF > release-notes.md
+          ## JBL PartyBox Stage 320 — אפליקציית שליטה Native בעברית (${NEXT_TAG})
+
+          שחרור רשמי **${NEXT_TAG}** (גרסת אפליקציה \`${APP_VER}\` · Build \`${VER_CODE}\`) עבור רמקול **JBL PartyBox Stage 320**.
+          אפליקציה זו בנויה ב-**100% Native Android (Java 17)** ללא WebView וללא מעטפת HTML — לביצועים מיידיים, משקל קובץ מזערי (~70KB), יציבות מרבית וצריכת זיכרון וסוללה נמוכה במיוחד.
+
+          ---
+
+          ### עיקרי היכולות והממשק
+          - **ביצועי Native מלאים ואייקוני SVG וקטוריים**: הזנקה בפחות מ-50ms, ניווט חלק ללא ריצודים וכל הסמלים בפורמט Vector SVG נקי ומינימליסטי.
+          - **מסך הגדרות (צד ימין למעלה)**:
+            - בחירת מצב תצוגה: **מצב בהיר / מצב כהה / לפי מערכת**.
+            - **מדריך שימוש מובנה** ופירוט מלא על האפליקציה והפרוטוקולים.
+            - **עדכון אוטומטי מ-GitHub Releases**: בדיקת תג גרסה מול מאגר ה-Releases, הצגת פירוט השינויים והורדה + התקנה בלחיצה אחת.
+          - **מסך אודות (צד שמאל למעלה)**:
+            - קרדיט פיתוח ל-**״אש התורה״** עם קישורים ישירים לפרופיל ב-[GitHub](https://github.com/ES2323ES) וב-[מתמחים טופ](https://mitmachim.top/user/%D7%90%D7%A9-%D7%94%D7%AA%D7%95%D7%A8%D7%94).
+            - פירוט גרסת האפליקציה ורשימת **״מה חדש״**.
+          - **שורת ניווט תחתונה קבועה ונוחה (מימין לשמאל)**:
+            1. **חיבור ופרטי בוקסה**: סריקה וחיבור מהיר ל-JBL PartyBox 320 (BLE GATT + RFCOMM SPP + A2DP) והצגת שם הבוקסה, אחוז סוללה, גרסת קושחה, כתובת MAC ועוצמת קליטה (RSSI).
+            2. **שליטה ותאורה**: שליטה בעוצמה ראשית, 3 מצבי Bass Boost (כבוי / עמוק / חד), תאורת מופע עם 7 מצבים כולל **ניאון**, בחירת צבעים, בהירות, מהירות, 5 אזורי תאורה וכניסת מיקרופון/אקו.
+            3. **איקוולייזר חומרתי**: 7 ערוצי תדר (\`63Hz\` עד \`12kHz\`) המחוברים למנוע השמע החומרתי של אנדרואיד ולבוקסה, עם פרופילים מובנים ושמירת פרופילים אישיים.
+            4. **בחירת שירים ונגן**: סריקת השירים המקומיים במכשיר (\`MediaStore\`), בחירת קבצים מתיקייה, חיפוש מהיר, נגן מובנה ושליטה בנגן המערכת הפעיל.
+            5. **הגדרות הבוקסה**: שליטה בצלילי החיווי של הבוקסה, Playtime Boost, מצב אקוסטי (פנים/חוץ), הגדרות סטריאו / Auracast ובחירת פרוטוקול שידור.
+
+          ---
+
+          ### היסטוריית שינויים בעדכון זה (${NEXT_TAG})
+          ${COMMITS_LOG}
+
+          ---
+
+          ### קבצים מצורפים ואימות חתימה (SHA-256)
+          | קובץ | תיאור | גודל | SHA-256 |
+          | :--- | :--- | :--- | :--- |
+          | \`JBL-PartyBox-320-HE.apk\` | קובץ התקנה ישיר וחתום לאנדרואיד (Native Android) | ${APK_SIZE} | \`${APK_SHA}\` |
+          | \`JBL-PartyBox-320-HE-APK.zip\` | ארכיון ZIP הכולל את ה-APK ומדריך התקנה בעברית | ${ZIP_SIZE} | \`${ZIP_SHA}\` |
+
+          ---
+
+          ### הוראות התקנה ועדכון
+          1. הורד את הקובץ **\`JBL-PartyBox-320-HE.apk\`** למכשיר האנדרואיד (גרסה 7.0 ומעלה) והתקן אותו.
+          2. אם מותקנת במכשיר גרסת ה-WebView הישנה (\`0.2.x\`), מומלץ להסיר אותה חד-פעמית לפני התקנת גרסת ה-Native החדשה.
+          3. החל מגרסה זו, ניתן לבדוק ולהתקין גרסאות חדשות ישירות מתוך האפליקציה דרך **הגדרות (למעלה מימין) ← עדכון אוטומטי מ-GitHub Releases**.
+
+          ---
+          פותח על ידי **״אש התורה״** · [GitHub](https://github.com/ES2323ES) · [מתמחים טופ](https://mitmachim.top/user/%D7%90%D7%A9-%D7%94%D7%AA%D7%95%D7%A8%D7%94)
+          EOF
+
+      - name: Create Tag & Publish GitHub Release
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_TAG: ${{ steps.meta.outputs.next_tag }}
+          APP_VER: ${{ steps.meta.outputs.app_ver }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG (Native Android v$APP_VER)"
+          git push origin "$NEXT_TAG"
+
+          gh release create "$NEXT_TAG" \
+            release-dist/JBL-PartyBox-320-HE.apk \
+            release-dist/JBL-PartyBox-320-HE-APK.zip \
+            --title "JBL PartyBox 320 Hebrew ${NEXT_TAG} — Native Android v${APP_VER}" \
+            --notes-file release-notes.md

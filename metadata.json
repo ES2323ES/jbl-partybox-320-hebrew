@@ -1,0 +1,6 @@
+{
+  "name": "JBL PartyBox 320 — מרכז שליטה",
+  "description": "אפליקציית שליטה ייעודית בעברית לרמקול הנייד JBL PartyBox Stage 320 — אפליקציית Native Android מהירה עם שליטה בתאורה, איקוולייזר חומרתי, בחירת שירים ועדכון אוטומטי מ-GitHub Releases.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

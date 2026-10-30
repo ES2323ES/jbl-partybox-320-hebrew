@@ -1,0 +1,11 @@
+node_modules/
+build/
+app/build/
+.gradle/
+local.properties
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
